@@ -19,7 +19,11 @@ mcp_server = MCPServer("study-bot")
 
 @mcp_server.tool()
 def add_card(question: str, answer: str, tags: str = "") -> dict:
-    """Add a single flashcard. tags is optional comma-separated e.g. 'python,algorithms'."""
+    """Add a single flashcard. tags is optional comma-separated e.g. 'python,algorithms'.
+
+    Telegram limit: question + answer combined should stay under 4096 chars per message.
+    Keep each field concise — question under 300 chars, answer under 500 chars is a safe rule.
+    """
     chat_id = db.get_registered_chat_id()
     if chat_id is None:
         return {"error": "No registered chat. Send /start to the bot first."}
@@ -33,7 +37,8 @@ def add_cards_bulk(cards: list[dict]) -> dict:
     """Add multiple flashcards to the deck in a single call.
 
     Args:
-        cards: List of dicts, each with "question" and "answer" string keys.
+        cards: List of dicts, each with "question", "answer", and optional "tags" string keys.
+            Telegram limit: keep question under 300 chars and answer under 500 chars per card.
 
     Returns:
         Dict with ids (list of ints) and count of cards added,
