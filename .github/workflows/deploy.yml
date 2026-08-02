@@ -14,11 +14,11 @@ jobs:
           host: ${{ secrets.ORACLE_HOST }}
           username: ${{ secrets.ORACLE_USER }}
           key: ${{ secrets.ORACLE_SSH_KEY }}
-          envs: TELEGRAM_BOT_TOKEN
+          envs: TELEGRAM_BOT_TOKEN,MCP_HOST
           script: |
             cd ~/flashcard-telegram-bot
             git pull origin main
-            echo "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN" > .env
+            printf "TELEGRAM_BOT_TOKEN=%s\nMCP_HOST=%s\n" "$TELEGRAM_BOT_TOKEN" "$MCP_HOST" > .env
             chmod 600 .env
             source venv/bin/activate
             pip install -r requirements.txt --quiet
@@ -26,3 +26,4 @@ jobs:
             echo "Deployed at $(date)"
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          MCP_HOST: ${{ secrets.MCP_HOST }}
