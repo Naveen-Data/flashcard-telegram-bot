@@ -112,8 +112,9 @@ async def _send_next_card(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> N
     tags_str = f"\n🏷 {card['tags']}" if card.get("tags") else ""
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"📚 {_clip(card['question'], 500)}{tags_str}{bar}",
+        text=f"📚 *{_clip(card['question'], 500)}*{tags_str}{bar}",
         reply_markup=_build_due_keyboard(card_id),
+        parse_mode="Markdown",
     )
 
 
@@ -404,9 +405,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await query.edit_message_text("Card not found.")
                 return
             tags_str = f"\n🏷 {card['tags']}" if card.get("tags") else ""
+            answer = _clip(card['answer'], 800)
             await query.edit_message_text(
-                f"📚 {_clip(card['question'], 500)}\n\n💡 {_clip(card['answer'], 800)}{tags_str}",
+                f"*{_clip(card['question'], 500)}*\n\n💡 {answer}{tags_str}",
                 reply_markup=_build_answer_keyboard(card_id),
+                parse_mode="Markdown",
             )
 
         elif data.startswith("ans:"):
