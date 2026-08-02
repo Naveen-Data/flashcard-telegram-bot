@@ -24,6 +24,11 @@ logger = logging.getLogger(__name__)
 
 _TAG_RE = re.compile(r"#(\w+)")
 _IST = timedelta(hours=5, minutes=30)
+_TG_MAX = 4096
+
+
+def _clip(text: str, limit: int = 300) -> str:
+    return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
 def _ist_to_utc(hour: int, minute: int) -> tuple[int, int]:
@@ -107,7 +112,7 @@ async def _send_next_card(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> N
     tags_str = f"\n🏷 {card['tags']}" if card.get("tags") else ""
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"📚 {card['question']}{tags_str}{bar}",
+        text=f"📚 {_clip(card['question'], 500)}{tags_str}{bar}",
         reply_markup=_build_due_keyboard(card_id),
     )
 
@@ -204,10 +209,11 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     lines = [f"🔍 {len(results)} result(s) for \"{keyword}\":\n"]
     for card in results[:10]:
         tags_str = f" 🏷 {card['tags']}" if card.get("tags") else ""
-        lines.append(f"• {card['question']}{tags_str}\n  → {card['answer']}")
+        lines.append(f"• {_clip(card['question'], 120)}{tags_str}\n  → {_clip(card['answer'], 200)}")
     if len(results) > 10:
         lines.append(f"\n…and {len(results) - 10} more.")
-    await update.message.reply_text("\n".join(lines))
+    msg = "\n".join(lines)
+    await update.message.reply_text(msg[:_TG_MAX])
 
 
 async def streak_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -399,7 +405,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 return
             tags_str = f"\n🏷 {card['tags']}" if card.get("tags") else ""
             await query.edit_message_text(
-                f"📚 {card['question']}\n\n💡 {card['answer']}{tags_str}",
+                f"📚 {_clip(card['question'], 500)}\n\n💡 {_clip(card['answer'], 800)}{tags_str}",
                 reply_markup=_build_answer_keyboard(card_id),
             )
 
