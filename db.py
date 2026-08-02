@@ -92,6 +92,22 @@ def list_due_cards(chat_id: int, tag: Optional[str] = None) -> list[dict]:
         return [dict(row) for row in rows]
 
 
+def list_all_cards(chat_id: int, tag: Optional[str] = None) -> list[dict]:
+    with _get_connection() as conn:
+        if tag:
+            rows = conn.execute(
+                "SELECT * FROM cards WHERE chat_id = ?"
+                " AND ',' || tags || ',' LIKE ?",
+                (chat_id, f"%,{tag},%"),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM cards WHERE chat_id = ?",
+                (chat_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+
 def list_tags(chat_id: int) -> list[tuple[str, int, int]]:
     """Return (tag, total_cards, due_cards) sorted by tag name."""
     now = datetime.utcnow().isoformat()

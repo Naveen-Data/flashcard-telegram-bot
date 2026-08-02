@@ -99,8 +99,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def review_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    tag = context.args[0].lstrip("#") if context.args else None
-    due_cards = db.list_due_cards(chat_id, tag=tag)
+    args = [a.lstrip("#") for a in (context.args or [])]
+    review_all = "all" in args
+    tag = next((a for a in args if a != "all"), None)
+    if review_all:
+        due_cards = db.list_all_cards(chat_id, tag=tag)
+    else:
+        due_cards = db.list_due_cards(chat_id, tag=tag)
     if not due_cards:
         suffix = f" for #{tag}" if tag else ""
         await update.message.reply_text(f"No cards due{suffix}! 🎉")
@@ -109,7 +114,7 @@ async def review_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.bot_data.pop("last_notified_ids", None)
     suffix = f" for #{tag}" if tag else ""
     await update.message.reply_text(
-        f"Starting review{suffix}: {len(due_cards)} card(s) due."
+        f"Starting review{suffix}: {len(due_cards)} card(s)."
     )
     await _send_next_card(context, chat_id)
 
