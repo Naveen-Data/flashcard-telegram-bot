@@ -1,7 +1,8 @@
+import asyncio
 import logging
 import os
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 import db
 
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 db.init_db()
 
-mcp_server = FastMCP("study-bot")
+mcp_server = MCPServer("study-bot")
 
 
 @mcp_server.tool()
@@ -77,4 +78,4 @@ if __name__ == "__main__":
     host = os.environ.get("MCP_HOST", "127.0.0.1")
     port = int(os.environ.get("MCP_PORT", "8811"))
     logger.info("Starting MCP server on http://%s:%d/mcp", host, port)
-    mcp_server.run(transport="streamable-http", host=host, port=port, path="/mcp")
+    asyncio.run(mcp_server.run_streamable_http_async(host=host, port=port, streamable_http_path="/mcp"))
