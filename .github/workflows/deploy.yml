@@ -22,7 +22,7 @@ jobs:
             chmod 600 .env
             source venv/bin/activate
             pip install -r requirements.txt --quiet
-            sudo systemctl restart studybot
+            sudo systemctl restart studybot studybot-mcp
             echo "Deployed at $(date)"
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

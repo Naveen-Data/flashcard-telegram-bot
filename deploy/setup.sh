@@ -20,17 +20,26 @@ echo "==> Creating virtualenv and installing dependencies..."
 python3 -m venv "$REPO_DIR/venv"
 "$REPO_DIR/venv/bin/pip" install --quiet -r "$REPO_DIR/requirements.txt"
 
-echo "==> Installing systemd service..."
-SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-sudo cp "$REPO_DIR/deploy/studybot.service" "$SERVICE_FILE"
-sudo sed -i "s|USER_PLACEHOLDER|$USER|g" "$SERVICE_FILE"
-sudo sed -i "s|PROJECT_DIR_PLACEHOLDER|$REPO_DIR|g" "$SERVICE_FILE"
+echo "==> Installing systemd services..."
+for SVC in studybot studybot-mcp; do
+  SERVICE_FILE="/etc/systemd/system/${SVC}.service"
+  sudo cp "$REPO_DIR/deploy/${SVC}.service" "$SERVICE_FILE"
+  sudo sed -i "s|USER_PLACEHOLDER|$USER|g" "$SERVICE_FILE"
+  sudo sed -i "s|PROJECT_DIR_PLACEHOLDER|$REPO_DIR|g" "$SERVICE_FILE"
+done
 
-echo "==> Enabling and starting service..."
+echo "==> Allowing passwordless sudo for service restarts..."
+echo "$USER ALL=(ALL) NOPASSWD: /bin/systemctl restart studybot, /bin/systemctl restart studybot-mcp, /bin/systemctl restart studybot studybot-mcp" | sudo tee /etc/sudoers.d/studybot > /dev/null
+
+echo "==> Enabling and starting services..."
 sudo systemctl daemon-reload
-sudo systemctl enable "$SERVICE_NAME"
-sudo systemctl restart "$SERVICE_NAME"
+for SVC in studybot studybot-mcp; do
+  sudo systemctl enable "$SVC"
+  sudo systemctl restart "$SVC"
+done
 
 echo ""
-echo "Done! Check status with: sudo systemctl status studybot"
-echo "View logs with:          sudo journalctl -u studybot -f"
+echo "Done!"
+echo "Check status:  sudo systemctl status studybot studybot-mcp"
+echo "View bot logs: sudo journalctl -u studybot -f"
+echo "View MCP logs: sudo journalctl -u studybot-mcp -f"

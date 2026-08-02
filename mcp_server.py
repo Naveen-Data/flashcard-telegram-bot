@@ -1,7 +1,8 @@
+import asyncio
 import logging
 import os
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 import db
 
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 db.init_db()
 
-mcp_server = FastMCP("study-bot")
+mcp_server = MCPServer("study-bot")
 
 
 @mcp_server.tool()
@@ -29,14 +30,10 @@ def add_card(question: str, answer: str, tags: str = "") -> dict:
 
 @mcp_server.tool()
 def add_cards_bulk(cards: list[dict]) -> dict:
-    """Add multiple flashcards to the deck in a single call.
-
-    Args:
-        cards: List of dicts, each with "question" and "answer" string keys.
-
-    Returns:
-        Dict with ids (list of ints) and count of cards added,
-        or an error key if no chat is registered.
+    """Add multiple flashcards in one call. Each card is a dict with keys:
+    - question (str, required)
+    - answer (str, required)
+    - tags (str, optional) — comma-separated e.g. 'rag,embeddings'
     """
     chat_id = db.get_registered_chat_id()
     if chat_id is None:
@@ -77,4 +74,4 @@ if __name__ == "__main__":
     host = os.environ.get("MCP_HOST", "127.0.0.1")
     port = int(os.environ.get("MCP_PORT", "8811"))
     logger.info("Starting MCP server on http://%s:%d/mcp", host, port)
-    mcp_server.run(transport="streamable-http", host=host, port=port, path="/mcp")
+    asyncio.run(mcp_server.run_streamable_http_async(host=host, port=port, streamable_http_path="/mcp"))
