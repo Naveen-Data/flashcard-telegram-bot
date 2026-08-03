@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from urllib.parse import parse_qs
 
 import uvicorn
 from starlette.responses import JSONResponse
@@ -83,7 +84,11 @@ def get_stats() -> dict:
 
 
 class BearerAuthMiddleware:
-    """Rejects any HTTP request without a matching Authorization: Bearer <token> header."""
+    """Rejects requests without a valid token, from either the Authorization header
+    (Authorization: Bearer <token>) or a ?token=<token> query param — the latter exists
+    because some MCP clients (e.g. Claude Desktop's custom connector UI) only accept a
+    single URL field with no way to attach custom headers.
+    """
 
     def __init__(self, app, token: str):
         self.app = app
@@ -95,7 +100,8 @@ class BearerAuthMiddleware:
             return
         headers = dict(scope.get("headers", []))
         auth = headers.get(b"authorization", b"").decode()
-        if auth != f"Bearer {self.token}":
+        query_token = parse_qs(scope.get("query_string", b"").decode()).get("token", [None])[0]
+        if auth != f"Bearer {self.token}" and query_token != self.token:
             response = JSONResponse({"error": "Unauthorized"}, status_code=401)
             await response(scope, receive, send)
             return
