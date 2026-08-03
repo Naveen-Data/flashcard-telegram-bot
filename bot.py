@@ -81,20 +81,29 @@ def _snooze_delta(snooze_type: str) -> timedelta:
     return timedelta(hours=1)
 
 
+def _pop_from_queue(context: ContextTypes.DEFAULT_TYPE, card_id: int) -> None:
+    """Remove first occurrence of card_id from queue regardless of position."""
+    queue: list[int] = context.chat_data.get("review_queue", [])
+    try:
+        idx = queue.index(card_id)
+        context.chat_data["review_queue"] = queue[:idx] + queue[idx + 1:]
+    except ValueError:
+        pass
+
+
 async def _send_next_card(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     queue: list[int] = context.chat_data.get("review_queue", [])
     if not queue:
         session = context.chat_data.pop("session", None)
         if session and session.get("reviewed", 0) > 0:
             reviewed = session["reviewed"]
-            correct = session["correct"]
+            correct = session.get("correct", 0)
             accuracy = round(correct / reviewed * 100)
             elapsed = int((datetime.utcnow() - session["start"]).total_seconds() / 60)
             elapsed_str = f" • {elapsed}m" if elapsed > 0 else ""
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"🎉 Session complete!\n"
-                     f"📊 {reviewed} cards • {accuracy}% accuracy{elapsed_str}",
+                text=f"🎉 Session complete!\n📊 {reviewed} cards • {accuracy}% accuracy{elapsed_str}",
             )
         else:
             await context.bot.send_message(chat_id=chat_id, text="🎉 All done! Great work.")
@@ -110,11 +119,11 @@ async def _send_next_card(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> N
     total = session.get("total", len(queue))
     bar = f"\n{_progress_bar(reviewed, total)} {reviewed}/{total}" if total else ""
     tags_str = f"\n🏷 {card['tags']}" if card.get("tags") else ""
+    # Plain text for card content — avoids Markdown parse errors on special chars
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"📚 *{_clip(card['question'], 500)}*{tags_str}{bar}",
+        text=f"📚 {_clip(card['question'], 500)}{tags_str}{bar}",
         reply_markup=_build_due_keyboard(card_id),
-        parse_mode="Markdown",
     )
 
 
@@ -175,9 +184,7 @@ async def review_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     }
     context.bot_data.pop("last_notified_ids", None)
     suffix = f" for #{tag}" if tag else ""
-    await update.message.reply_text(
-        f"Starting review{suffix}: {len(due_cards)} card(s)."
-    )
+    await update.message.reply_text(f"Starting review{suffix}: {len(due_cards)} card(s).")
     await _send_next_card(context, chat_id)
 
 
@@ -200,32 +207,31 @@ async def tags_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     if not context.args:
-        await update.message.reply_text("Usage: /search `keyword`", parse_mode="Markdown")
+        await update.message.reply_text("Usage: /search keyword")
         return
     keyword = " ".join(context.args)
     results = db.search_cards(chat_id, keyword)
     if not results:
-        await update.message.reply_text(f"No cards found for \"{keyword}\".")
+        await update.message.reply_text(f'No cards found for "{keyword}".')
         return
-    lines = [f"🔍 {len(results)} result(s) for \"{keyword}\":\n"]
+    lines = [f'🔍 {len(results)} result(s) for "{keyword}":\n']
     for card in results[:10]:
         tags_str = f" 🏷 {card['tags']}" if card.get("tags") else ""
         lines.append(f"• {_clip(card['question'], 120)}{tags_str}\n  → {_clip(card['answer'], 200)}")
     if len(results) > 10:
         lines.append(f"\n…and {len(results) - 10} more.")
-    msg = "\n".join(lines)
-    await update.message.reply_text(msg[:_TG_MAX])
+    await update.message.reply_text("\n".join(lines)[:_TG_MAX])
 
 
 async def streak_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     info = db.get_streak_info(chat_id)
     goal = int(db.get_setting(chat_id, "daily_goal") or "0")
-    today = db.get_weekly_stats(chat_id)
     today_count_str = ""
     if goal > 0:
+        weekly = db.get_weekly_stats(chat_id)
         today_ist = (datetime.utcnow() + _IST).date().isoformat()
-        today_reviewed = today["by_day"].get(today_ist, 0)
+        today_reviewed = weekly["by_day"].get(today_ist, 0)
         bar = _progress_bar(today_reviewed, goal)
         today_count_str = f"\n\n🎯 Today: {bar} {today_reviewed}/{goal}"
     current = info["current"]
@@ -265,8 +271,7 @@ async def setdigest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     db.set_global_setting("digest_time_ist", f"{h:02d}:{m:02d}")
     h_utc, m_utc = _ist_to_utc(h, m)
-    current_jobs = context.job_queue.get_jobs_by_name("daily_digest")
-    for job in current_jobs:
+    for job in context.job_queue.get_jobs_by_name("daily_digest"):
         job.schedule_removal()
     context.job_queue.run_daily(
         daily_digest,
@@ -303,9 +308,7 @@ async def handle_add_card(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     body = text[4:].strip()
     if " / " not in body:
-        await update.message.reply_text(
-            "❌ Format: `add: question / answer`", parse_mode="Markdown"
-        )
+        await update.message.reply_text("❌ Format: add: question / answer")
         return
     question, _, rest = body.partition(" / ")
     question = question.strip()
@@ -354,24 +357,16 @@ async def daily_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     tags = db.list_tags(chat_id)
-    tag_lines = []
-    for tag, _, due in tags:
-        if due > 0:
-            tag_lines.append(f"  #{tag}: {due} due")
-    tag_summary = "\n".join(tag_lines) if tag_lines else ""
-    msg = (
-        f"🌅 Good morning! {len(due_cards)} card(s) due today.\n"
-        f"🔥 Streak: {streak['current']} day(s)\n"
-    )
-    if tag_summary:
-        msg += f"\n{tag_summary}\n"
+    tag_lines = [f"  #{tag}: {due} due" for tag, _, due in tags if due > 0]
+    msg = f"🌅 Good morning! {len(due_cards)} card(s) due today.\n🔥 Streak: {streak['current']} day(s)\n"
+    if tag_lines:
+        msg += "\n" + "\n".join(tag_lines) + "\n"
     msg += "\n/review to start."
     await context.bot.send_message(chat_id=chat_id, text=msg)
 
 
 async def weekly_report(context: ContextTypes.DEFAULT_TYPE) -> None:
-    now_ist = datetime.utcnow() + _IST
-    if now_ist.weekday() != 6:
+    if (datetime.utcnow() + _IST).weekday() != 6:
         return
     chat_id = db.get_registered_chat_id()
     if chat_id is None:
@@ -405,11 +400,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await query.edit_message_text("Card not found.")
                 return
             tags_str = f"\n🏷 {card['tags']}" if card.get("tags") else ""
-            answer = _clip(card['answer'], 800)
+            # Plain text for card content — avoids Markdown parse errors on special chars
             await query.edit_message_text(
-                f"*{_clip(card['question'], 500)}*\n\n💡 {answer}{tags_str}",
+                f"📚 {_clip(card['question'], 500)}\n\n💡 {_clip(card['answer'], 800)}{tags_str}",
                 reply_markup=_build_answer_keyboard(card_id),
-                parse_mode="Markdown",
             )
 
         elif data.startswith("ans:"):
@@ -422,15 +416,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             card = db.get_card(card_id)
             next_date = card["due_at"][:10] if card else "N/A"
             labels = {1: "🔴 Again", 3: "🟠 Hard", 4: "🟢 Good", 5: "🔵 Easy"}
-            await query.edit_message_text(
-                f"{labels.get(quality, '✅')} — next review: {next_date}"
-            )
+            await query.edit_message_text(f"{labels.get(quality, '✅')} — next review: {next_date}")
             session = context.chat_data.get("session", {})
             session["reviewed"] = session.get("reviewed", 0) + 1
             if quality >= 3:
                 session["correct"] = session.get("correct", 0) + 1
             context.chat_data["session"] = session
             _pop_from_queue(context, card_id)
+            if quality == 1:  # Again — re-queue at end, increment total for accurate progress bar
+                queue = context.chat_data.get("review_queue", [])
+                if card_id not in queue:
+                    context.chat_data["review_queue"] = queue + [card_id]
+                    session["total"] = session.get("total", 0) + 1
+                    context.chat_data["session"] = session
             await _send_next_card(context, chat_id)
 
         elif data.startswith("snooze:"):
@@ -439,9 +437,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             card_id = int(parts[2])
             db.snooze_card(card_id, _snooze_delta(snooze_type))
             label_map = {"1h": "1 hour", "tonight": "tonight", "tomorrow": "tomorrow"}
-            await query.edit_message_text(
-                f"⏰ Snoozed until {label_map.get(snooze_type, snooze_type)}"
-            )
+            await query.edit_message_text(f"⏰ Snoozed until {label_map.get(snooze_type, snooze_type)}")
             _pop_from_queue(context, card_id)
             await _send_next_card(context, chat_id)
 
@@ -450,21 +446,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     except Exception as e:
         logger.error("Error handling callback %s: %s", data, e)
-
-
-def _pop_from_queue(context: ContextTypes.DEFAULT_TYPE, card_id: int) -> None:
-    queue: list[int] = context.chat_data.get("review_queue", [])
-    if queue and queue[0] == card_id:
-        context.chat_data["review_queue"] = queue[1:]
+        await query.answer("Something went wrong, please try again.")
 
 
 def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
-        sys.exit(
-            "Error: TELEGRAM_BOT_TOKEN environment variable not set.\n"
-            "Export it before running: export TELEGRAM_BOT_TOKEN='your-token-here'"
-        )
+        sys.exit("Error: TELEGRAM_BOT_TOKEN environment variable not set.")
 
     db.init_db()
 
@@ -479,9 +467,7 @@ def main() -> None:
     application.add_handler(CommandHandler("goal", goal_command))
     application.add_handler(CommandHandler("setdigest", setdigest_command))
     application.add_handler(CommandHandler("pomodoro", pomodoro_command))
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_card)
-    )
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_card))
     application.add_handler(CallbackQueryHandler(handle_callback))
 
     application.job_queue.run_repeating(check_due_cards, interval=300, first=10)
@@ -495,7 +481,6 @@ def main() -> None:
         name="daily_digest",
     )
 
-    # Weekly report every day at 7PM IST (13:30 UTC), fires only on Sundays
     wr_h, wr_m = _ist_to_utc(19, 0)
     application.job_queue.run_daily(
         weekly_report,
