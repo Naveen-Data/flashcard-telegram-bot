@@ -300,16 +300,30 @@ def set_daily_goal(chat_id: int, goal: int) -> None:
 def update_streak(chat_id: int) -> None:
     today = _now_ist().date().isoformat()
     yesterday = (_now_ist() - timedelta(days=1)).date().isoformat()
-    last = get_setting(chat_id, "streak_last_date")
-    if last == today:
-        return
-    current = int(get_setting(chat_id, "streak_current") or "0")
-    longest = int(get_setting(chat_id, "streak_longest") or "0")
-    current = current + 1 if last == yesterday else 1
-    longest = max(longest, current)
-    set_setting(chat_id, "streak_last_date", today)
-    set_setting(chat_id, "streak_current", str(current))
-    set_setting(chat_id, "streak_longest", str(longest))
+    with _get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        def _get(key):
+            row = conn.execute(
+                "SELECT value FROM chat_settings WHERE chat_id=? AND key=?", (chat_id, key)
+            ).fetchone()
+            return row["value"] if row else None
+        def _set(key, value):
+            conn.execute(
+                "INSERT OR REPLACE INTO chat_settings (chat_id, key, value) VALUES (?,?,?)",
+                (chat_id, key, value),
+            )
+        last = _get("streak_last_date")
+        if last == today:
+            conn.execute("ROLLBACK")
+            return
+        current = int(_get("streak_current") or "0")
+        longest = int(_get("streak_longest") or "0")
+        current = current + 1 if last == yesterday else 1
+        longest = max(longest, current)
+        _set("streak_last_date", today)
+        _set("streak_current", str(current))
+        _set("streak_longest", str(longest))
+        conn.commit()
 
 
 def get_streak_info(chat_id: int) -> dict:
