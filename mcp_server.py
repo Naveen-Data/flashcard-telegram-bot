@@ -2,6 +2,9 @@ import asyncio
 import logging
 import os
 
+import uvicorn
+from starlette.responses import JSONResponse
+
 from mcp.server.mcpserver import MCPServer
 
 import db
@@ -79,8 +82,40 @@ def get_stats() -> dict:
     return db.get_stats(chat_id)
 
 
+class BearerAuthMiddleware:
+    """Rejects any HTTP request without a matching Authorization: Bearer <token> header."""
+
+    def __init__(self, app, token: str):
+        self.app = app
+        self.token = token
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = dict(scope.get("headers", []))
+        auth = headers.get(b"authorization", b"").decode()
+        if auth != f"Bearer {self.token}":
+            response = JSONResponse({"error": "Unauthorized"}, status_code=401)
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
 if __name__ == "__main__":
     host = os.environ.get("MCP_HOST", "127.0.0.1")
     port = int(os.environ.get("MCP_PORT", "8811"))
-    logger.info("Starting MCP server on http://%s:%d/mcp", host, port)
-    asyncio.run(mcp_server.run_streamable_http_async(host=host, port=port, streamable_http_path="/mcp"))
+    token = os.environ.get("MCP_AUTH_TOKEN")
+    if not token:
+        raise SystemExit(
+            "Error: MCP_AUTH_TOKEN environment variable not set.\n"
+            'Generate one with: python -c "import secrets; print(secrets.token_urlsafe(32))"'
+        )
+
+    app = mcp_server.streamable_http_app(streamable_http_path="/mcp", host=host)
+    app = BearerAuthMiddleware(app, token)
+
+    logger.info("Starting MCP server on http://%s:%d/mcp (auth required)", host, port)
+    config = uvicorn.Config(app, host=host, port=port, log_level="info")
+    server = uvicorn.Server(config)
+    asyncio.run(server.serve())
