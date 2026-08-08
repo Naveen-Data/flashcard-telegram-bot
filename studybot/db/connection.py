@@ -67,6 +67,15 @@ def init_db() -> None:
             )
         """)
         for col, typedef in [
+            ("stability", "REAL DEFAULT NULL"),
+            ("difficulty", "REAL DEFAULT NULL"),
+            ("last_review", "DATETIME DEFAULT NULL"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE undo_snapshots ADD COLUMN {col} {typedef}")
+            except sqlite3.OperationalError:
+                pass
+        for col, typedef in [
             ("tags", "TEXT DEFAULT NULL"),
             ("ease_factor", "REAL NOT NULL DEFAULT 2.5"),
             ("interval_days", "INTEGER NOT NULL DEFAULT 1"),
@@ -74,9 +83,42 @@ def init_db() -> None:
             ("card_type", "TEXT NOT NULL DEFAULT 'basic'"),
             ("image_file_id", "TEXT DEFAULT NULL"),
             ("consecutive_again", "INTEGER NOT NULL DEFAULT 0"),
+            # FSRS state — NULL until a card's first review, then always set
+            ("stability", "REAL DEFAULT NULL"),
+            ("difficulty", "REAL DEFAULT NULL"),
+            ("last_review", "DATETIME DEFAULT NULL"),
+            ("notes", "TEXT DEFAULT NULL"),
+            ("suspended", "INTEGER NOT NULL DEFAULT 0"),
+            ("buried_until", "DATETIME DEFAULT NULL"),
+            ("reverse_of", "INTEGER DEFAULT NULL"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE cards ADD COLUMN {col} {typedef}")
             except sqlite3.OperationalError:
                 pass
+        _backfill_fsrs_state(conn)
         conn.commit()
+
+
+def _backfill_fsrs_state(conn: sqlite3.Connection) -> None:
+    """Seed FSRS stability/difficulty for cards that predate the FSRS migration.
+
+    Only touches already-reviewed cards with no FSRS state yet; new cards are left
+    NULL so they initialise properly from their first real review.
+    """
+    from studybot.fsrs import seed_from_sm2
+
+    rows = conn.execute(
+        "SELECT id, ease_factor, interval_days, repetitions FROM cards"
+        " WHERE stability IS NULL AND repetitions > 0"
+    ).fetchall()
+    for row in rows:
+        stability, difficulty = seed_from_sm2(
+            row["ease_factor"], row["interval_days"], row["repetitions"]
+        )
+        if stability is None:
+            continue
+        conn.execute(
+            "UPDATE cards SET stability=?, difficulty=? WHERE id=?",
+            (stability, difficulty, row["id"]),
+        )

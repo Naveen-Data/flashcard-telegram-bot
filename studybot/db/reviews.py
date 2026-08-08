@@ -55,17 +55,77 @@ def get_weekly_stats(chat_id: int) -> dict:
     }
 
 
-def save_undo_snapshot(
-    chat_id: int, card_id: int, ease_factor: float, interval_days: int, repetitions: int,
-    due_at: str, stage: int, consecutive_again: int, review_log_id: Optional[int],
-) -> None:
+def count_reviews_today(chat_id: int) -> int:
+    """Reviews logged so far on the current IST day — drives the daily cap."""
+    today_start_ist = ((datetime.utcnow() + _IST).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ) - _IST).isoformat()
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM review_log WHERE chat_id=? AND reviewed_at>=?",
+            (chat_id, today_start_ist),
+        ).fetchone()
+    return row[0] if row else 0
+
+
+def get_retention_stats(chat_id: int, days: int = 30) -> dict:
+    """True retention: how often you recalled a card you'd already learned.
+
+    A card's very first review is excluded — it measures nothing about memory,
+    only whether you happened to know the material already.
+    """
+    since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT r.card_id, r.quality, r.reviewed_at, c.tags"
+            " FROM review_log r LEFT JOIN cards c ON c.id=r.card_id"
+            " WHERE r.chat_id=? ORDER BY r.card_id, r.reviewed_at",
+            (chat_id,),
+        ).fetchall()
+
+    seen_first: set[int] = set()
+    total = passed = 0
+    per_tag: dict[str, list[int]] = {}
+    for row in rows:
+        card_id = row["card_id"]
+        if card_id not in seen_first:
+            seen_first.add(card_id)
+            continue  # skip each card's first-ever review
+        if row["reviewed_at"] < since:
+            continue
+        total += 1
+        ok = 1 if row["quality"] > 1 else 0
+        passed += ok
+        for tag in (row["tags"] or "").split(","):
+            tag = tag.strip()
+            if tag:
+                per_tag.setdefault(tag, []).append(ok)
+
+    by_tag = {
+        tag: {"reviews": len(vals), "retention": round(sum(vals) / len(vals) * 100)}
+        for tag, vals in per_tag.items()
+        if vals
+    }
+    return {
+        "days": days,
+        "reviews": total,
+        "retention": round(passed / total * 100) if total else 0,
+        "by_tag": dict(sorted(by_tag.items(), key=lambda kv: kv[1]["retention"])),
+    }
+
+
+def save_undo_snapshot(chat_id: int, card: dict, review_log_id: Optional[int]) -> None:
+    """Store a card's pre-review state so the next /undo can restore it exactly."""
     with get_connection() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO undo_snapshots"
             " (chat_id, card_id, ease_factor, interval_days, repetitions, due_at, stage,"
-            "  consecutive_again, review_log_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (chat_id, card_id, ease_factor, interval_days, repetitions, due_at, stage,
-             consecutive_again, review_log_id, datetime.utcnow().isoformat()),
+            "  consecutive_again, review_log_id, created_at, stability, difficulty, last_review)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (chat_id, card["id"], card["ease_factor"], card["interval_days"],
+             card["repetitions"], card["due_at"], card["stage"], card["consecutive_again"],
+             review_log_id, datetime.utcnow().isoformat(),
+             card.get("stability"), card.get("difficulty"), card.get("last_review")),
         )
         conn.commit()
 
@@ -92,9 +152,11 @@ def apply_undo(chat_id: int) -> bool:
     with get_connection() as conn:
         conn.execute(
             "UPDATE cards SET ease_factor=?, interval_days=?, repetitions=?, due_at=?, stage=?,"
-            " consecutive_again=? WHERE id=?",
+            " consecutive_again=?, stability=?, difficulty=?, last_review=? WHERE id=?",
             (snapshot["ease_factor"], snapshot["interval_days"], snapshot["repetitions"],
-             snapshot["due_at"], snapshot["stage"], snapshot["consecutive_again"], snapshot["card_id"]),
+             snapshot["due_at"], snapshot["stage"], snapshot["consecutive_again"],
+             snapshot["stability"], snapshot["difficulty"], snapshot["last_review"],
+             snapshot["card_id"]),
         )
         if snapshot["review_log_id"] is not None:
             conn.execute("DELETE FROM review_log WHERE id=?", (snapshot["review_log_id"],))
