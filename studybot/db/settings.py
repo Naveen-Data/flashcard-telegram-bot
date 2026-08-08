@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from studybot.db.connection import get_connection
+from studybot.fsrs import DEFAULT_RETENTION
 
 _IST = timedelta(hours=5, minutes=30)
 
@@ -58,6 +59,69 @@ def set_setting(chat_id: int, key: str, value: str) -> None:
 
 def set_daily_goal(chat_id: int, goal: int) -> None:
     set_setting(chat_id, "daily_goal", str(goal))
+
+
+def get_study_window(chat_id: int) -> Optional[str]:
+    raw = get_setting(chat_id, "study_window")
+    return raw or None
+
+
+def set_study_window(chat_id: int, window: Optional[str]) -> None:
+    set_setting(chat_id, "study_window", window or "")
+
+
+def get_daily_cap(chat_id: int) -> Optional[int]:
+    raw = get_setting(chat_id, "daily_cap")
+    if not raw or not raw.isdigit() or int(raw) <= 0:
+        return None
+    return int(raw)
+
+
+def set_daily_cap(chat_id: int, cap: Optional[int]) -> None:
+    set_setting(chat_id, "daily_cap", str(cap) if cap else "")
+
+
+def get_desired_retention(chat_id: int) -> float:
+    raw = get_setting(chat_id, "desired_retention")
+    try:
+        value = float(raw) if raw else DEFAULT_RETENTION
+    except ValueError:
+        return DEFAULT_RETENTION
+    return min(0.99, max(0.7, value))
+
+
+def set_desired_retention(chat_id: int, retention: float) -> None:
+    set_setting(chat_id, "desired_retention", str(round(retention, 3)))
+
+
+def set_exam(chat_id: int, tag: str, date_str: str) -> None:
+    set_setting(chat_id, f"exam:{tag}", date_str)
+
+
+def clear_exam(chat_id: int, tag: str) -> None:
+    set_setting(chat_id, f"exam:{tag}", "")
+
+
+def list_exams(chat_id: int) -> list[tuple[str, str]]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT key, value FROM chat_settings WHERE chat_id=? AND key LIKE 'exam:%'",
+            (chat_id,),
+        ).fetchall()
+    return sorted(
+        (row["key"].split(":", 1)[1], row["value"]) for row in rows if row["value"]
+    )
+
+
+def get_exam_date_for_card(chat_id: int, tags: Optional[str]) -> Optional[str]:
+    """Soonest upcoming exam among a card's tags, if any."""
+    if not tags:
+        return None
+    exams = dict(list_exams(chat_id))
+    if not exams:
+        return None
+    dates = [exams[t.strip()] for t in tags.split(",") if t.strip() in exams]
+    return min(dates) if dates else None
 
 
 def get_dnd_window(chat_id: int) -> Optional[tuple[str, str]]:

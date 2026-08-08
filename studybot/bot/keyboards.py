@@ -9,6 +9,10 @@ def due_keyboard(card_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🌙 Tonight", callback_data=f"snooze:tonight:{card_id}"),
             InlineKeyboardButton("📅 Tomorrow", callback_data=f"snooze:tomorrow:{card_id}"),
         ],
+        [
+            InlineKeyboardButton("🫥 Bury", callback_data=f"bury:{card_id}"),
+            InlineKeyboardButton("⏸ Suspend", callback_data=f"suspend:{card_id}"),
+        ],
     ])
 
 

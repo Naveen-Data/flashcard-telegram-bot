@@ -6,7 +6,7 @@ from telegram.ext import ContextTypes
 
 from studybot import db
 from studybot.bot import keyboards, utils
-from studybot.sm2 import LEECH_THRESHOLD
+from studybot.fsrs import LEECH_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ async def send_next_card(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> No
         front = utils.cloze_front(front)
 
     # Plain text for card content — avoids Markdown parse errors on special chars
-    text = f"📚 {utils.clip(front, 500)}{tags_str}{bar}"
+    text = f"📚 #{card_id} — {utils.clip(front, 500)}{tags_str}{bar}"
     keyboard = keyboards.due_keyboard(card_id)
 
     if card.get("image_file_id"):
@@ -87,13 +87,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await edit("Card not found.")
                 return
             tags_str = f"\n🏷 {card['tags']}" if card.get("tags") else ""
+            notes_str = f"\n\n📝 {utils.clip(card['notes'], 500)}" if card.get("notes") else ""
             if card.get("card_type") == "cloze":
                 filled = utils.cloze_back(card["question"])
-                text = f"📚 {utils.clip(filled, 800)}{tags_str}"
+                text = f"📚 #{card_id} — {utils.clip(filled, 800)}{tags_str}{notes_str}"
             else:
                 text = (
-                    f"📚 {utils.clip(card['question'], 500)}\n\n"
-                    f"💡 {utils.clip(card['answer'], 800)}{tags_str}"
+                    f"📚 #{card_id} — {utils.clip(card['question'], 500)}\n\n"
+                    f"💡 {utils.clip(card['answer'], 800)}{tags_str}{notes_str}"
                 )
             await edit(text, reply_markup=keyboards.answer_keyboard(card_id))
 
@@ -103,24 +104,32 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             card_id = int(card_id_str)
 
             pre_card = db.get_card(card_id)
-            db.record_answer(card_id, quality)
+            if pre_card is None:
+                await edit("Card not found.")
+                return
+
+            db.record_answer(
+                card_id, quality,
+                desired_retention=db.get_desired_retention(chat_id),
+                study_window=db.get_study_window(chat_id),
+                exam_date=db.get_exam_date_for_card(chat_id, pre_card.get("tags")),
+            )
             log_id = db.log_review(chat_id, card_id, quality)
-            if pre_card:
-                db.save_undo_snapshot(
-                    chat_id, card_id,
-                    pre_card["ease_factor"], pre_card["interval_days"], pre_card["repetitions"],
-                    pre_card["due_at"], pre_card["stage"], pre_card["consecutive_again"],
-                    log_id,
-                )
+            db.save_undo_snapshot(chat_id, pre_card, log_id)
             db.update_streak(chat_id)
 
             card = db.get_card(card_id)
-            next_date = card["due_at"][:10] if card else "N/A"
             labels = {1: "🔴 Again", 3: "🟠 Hard", 4: "🟢 Good", 5: "🔵 Easy"}
+            if card:
+                next_date = card["due_at"][:10]
+                interval = card["interval_days"]
+                detail = f"next review: {next_date} ({interval}d)"
+            else:
+                detail = "next review: N/A"
             leech_note = ""
             if card and card.get("consecutive_again", 0) == LEECH_THRESHOLD:
-                leech_note = "\n⚠️ This card is now a leech (4+ wrong in a row) — see /leeches"
-            await edit(f"{labels.get(quality, '✅')} — next review: {next_date}{leech_note}")
+                leech_note = f"\n⚠️ Leech — {LEECH_THRESHOLD} wrong in a row. /leeches to manage."
+            await edit(f"{labels.get(quality, '✅')} — {detail}{leech_note}")
 
             session = context.chat_data.get("session", {})
             session["reviewed"] = session.get("reviewed", 0) + 1
@@ -128,7 +137,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 session["correct"] = session.get("correct", 0) + 1
             context.chat_data["session"] = session
             _pop_from_queue(context, card_id)
-            if quality == 1:  # Again — re-queue at end, increment total for accurate progress bar
+            if quality == 1:  # Again — re-queue at end, bump total so the bar stays honest
                 queue = context.chat_data.get("review_queue", [])
                 if card_id not in queue:
                     context.chat_data["review_queue"] = queue + [card_id]
@@ -143,6 +152,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             db.snooze_card(card_id, utils.snooze_delta(snooze_type))
             label_map = {"1h": "1 hour", "tonight": "tonight", "tomorrow": "tomorrow"}
             await edit(f"⏰ Snoozed until {label_map.get(snooze_type, snooze_type)}")
+            _pop_from_queue(context, card_id)
+            await send_next_card(context, chat_id)
+
+        elif data.startswith("bury:"):
+            card_id = int(data.split(":")[1])
+            db.bury_card(card_id)
+            await edit(f"🫥 Card #{card_id} buried until tomorrow (schedule untouched).")
+            _pop_from_queue(context, card_id)
+            await send_next_card(context, chat_id)
+
+        elif data.startswith("suspend:"):
+            card_id = int(data.split(":")[1])
+            db.set_suspended(card_id, True)
+            await edit(f"⏸ Card #{card_id} suspended. /unsuspend {card_id} to bring it back.")
             _pop_from_queue(context, card_id)
             await send_next_card(context, chat_id)
 

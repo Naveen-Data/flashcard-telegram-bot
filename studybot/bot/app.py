@@ -26,22 +26,36 @@ def main() -> None:
 
     application = ApplicationBuilder().token(token).build()
 
-    application.add_handler(CommandHandler("start", commands.start_command))
-    application.add_handler(CommandHandler("help", commands.help_command))
-    application.add_handler(CommandHandler("review", commands.review_command))
-    application.add_handler(CommandHandler("tags", commands.tags_command))
-    application.add_handler(CommandHandler("search", commands.search_command))
-    application.add_handler(CommandHandler("streak", commands.streak_command))
-    application.add_handler(CommandHandler("goal", commands.goal_command))
-    application.add_handler(CommandHandler("setdigest", commands.setdigest_command))
-    application.add_handler(CommandHandler("dnd", commands.dnd_command))
-    application.add_handler(CommandHandler("pomodoro", commands.pomodoro_command))
-    application.add_handler(CommandHandler("edit", commands.edit_command))
-    application.add_handler(CommandHandler("delete", commands.delete_command))
-    application.add_handler(CommandHandler("undo", commands.undo_command))
-    application.add_handler(CommandHandler("leeches", commands.leeches_command))
-    application.add_handler(CommandHandler("backup", commands.backup_command))
-    application.add_handler(CommandHandler("card", commands.card_command))
+    for name, handler in [
+        ("start", commands.start_command),
+        ("help", commands.help_command),
+        ("review", commands.review_command),
+        ("tags", commands.tags_command),
+        ("search", commands.search_command),
+        ("streak", commands.streak_command),
+        ("forecast", commands.forecast_command),
+        ("stats", commands.stats_command),
+        ("goal", commands.goal_command),
+        ("cap", commands.cap_command),
+        ("window", commands.window_command),
+        ("retention", commands.retention_command),
+        ("exam", commands.exam_command),
+        ("setdigest", commands.setdigest_command),
+        ("dnd", commands.dnd_command),
+        ("pomodoro", commands.pomodoro_command),
+        ("edit", commands.edit_command),
+        ("note", commands.note_command),
+        ("delete", commands.delete_command),
+        ("suspend", commands.suspend_command),
+        ("unsuspend", commands.unsuspend_command),
+        ("suspended", commands.suspended_command),
+        ("bury", commands.bury_command),
+        ("undo", commands.undo_command),
+        ("leeches", commands.leeches_command),
+        ("backup", commands.backup_command),
+        ("card", commands.card_command),
+    ]:
+        application.add_handler(CommandHandler(name, handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, commands.handle_add_card))
     application.add_handler(MessageHandler(filters.PHOTO, commands.handle_add_photo))
     application.add_handler(CallbackQueryHandler(handle_callback))
