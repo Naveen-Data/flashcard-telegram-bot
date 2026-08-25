@@ -7,6 +7,7 @@ from telegram.ext import ContextTypes
 from studybot import db
 from studybot.bot import keyboards, utils
 from studybot.fsrs import LEECH_THRESHOLD
+from studybot.review import apply_review
 
 logger = logging.getLogger(__name__)
 
@@ -103,22 +104,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             quality = int(quality_str)
             card_id = int(card_id_str)
 
-            pre_card = db.get_card(card_id)
-            if pre_card is None:
+            card = apply_review(chat_id, card_id, quality)
+            if card is None:
                 await edit("Card not found.")
                 return
 
-            db.record_answer(
-                card_id, quality,
-                desired_retention=db.get_desired_retention(chat_id),
-                study_window=db.get_study_window(chat_id),
-                exam_date=db.get_exam_date_for_card(chat_id, pre_card.get("tags")),
-            )
-            log_id = db.log_review(chat_id, card_id, quality)
-            db.save_undo_snapshot(chat_id, pre_card, log_id)
-            db.update_streak(chat_id)
-
-            card = db.get_card(card_id)
             labels = {1: "🔴 Again", 3: "🟠 Hard", 4: "🟢 Good", 5: "🔵 Easy"}
             if card:
                 next_date = card["due_at"][:10]

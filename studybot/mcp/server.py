@@ -213,6 +213,11 @@ def get_weak_cards() -> list[dict]:
     return db.list_weak_cards(chat_id)
 
 
+from studybot.web import register as _register_web  # noqa: E402
+
+_register_web(mcp_server)
+
+
 def run() -> None:
     host = os.environ.get("MCP_HOST", "127.0.0.1")
     port = int(os.environ.get("MCP_PORT", "8811"))
