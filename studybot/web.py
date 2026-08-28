@@ -59,6 +59,7 @@ input{width:100%;font:inherit;color:var(--fg);background:var(--card);border:1px 
   <button id="tab-review" class="on" onclick="go('review')">Review</button>
   <button id="tab-browse" onclick="go('browse')">Browse</button>
   <button id="tab-stats" onclick="go('stats')">Stats</button>
+  <button id="tab-notes" onclick="go('notes')">Notes</button>
 </nav>
 <script>
 const $=s=>document.querySelector(s), view=$('#view');
@@ -68,9 +69,9 @@ const api=(p,o)=>fetch(p,o).then(r=>r.json());
 
 function go(t){
   tab=t;
-  for(const k of ['review','browse','stats']) $('#tab-'+k).classList.toggle('on',k===t);
-  $('#title').textContent={review:'Review',browse:'Browse',stats:'Stats'}[t];
-  ({review:loadReview,browse:loadBrowse,stats:loadStats}[t])();
+  for(const k of ['review','browse','stats','notes']) $('#tab-'+k).classList.toggle('on',k===t);
+  $('#title').textContent={review:'Review',browse:'Browse',stats:'Stats',notes:'Notes'}[t];
+  ({review:loadReview,browse:loadBrowse,stats:loadStats,notes:loadNotes}[t])();
 }
 
 async function loadReview(){
@@ -145,6 +146,17 @@ async function loadStats(){
      s.forecast.map(f=>`<div class="notes">${esc(f.day)} — ${f.due}</div>`).join('')}</div>`;
 }
 
+async function loadNotes(){
+  $('#count').textContent='';
+  const notes=await api('/api/notes');
+  view.innerHTML=notes.length?notes.map(n=>
+    `<div class="card">
+       <div class="q" style="font-size:16px">${esc(n.topic)}</div>
+       <div class="notes">${esc(n.content)}</div>
+       ${n.tags?`<div class="tags">🏷 ${esc(n.tags)}</div>`:''}
+     </div>`).join(''):'<div class="empty">No session notes yet.</div>';
+}
+
 document.onkeydown=e=>{
   if(tab!=='review') return;
   if(e.key===' '&&!shown){e.preventDefault();reveal();}
@@ -209,3 +221,24 @@ def register(server) -> None:
             "streak": db.get_streak_info(cid)["current"],
             "forecast": [{"day": d, "due": n} for d, n in db.get_forecast(cid, days=7)],
         })
+
+    @server.custom_route("/api/notes", methods=["GET"])
+    async def notes(request: Request) -> Response:
+        cid = chat_id()
+        if cid is None:
+            return JSONResponse([])
+        return JSONResponse(db.list_session_notes(cid))
+
+    @server.custom_route("/api/notes", methods=["POST"])
+    async def add_note(request: Request) -> Response:
+        cid = chat_id()
+        if cid is None:
+            return JSONResponse({"error": "no registered chat"}, status_code=400)
+        body = await request.json()
+        topic = (body.get("topic") or "").strip()
+        content = (body.get("content") or "").strip()
+        if not topic or not content:
+            return JSONResponse({"error": "topic and content required"}, status_code=400)
+        tags = (body.get("tags") or "").strip() or None
+        note_id = db.add_session_note(cid, topic, content, tags=tags)
+        return JSONResponse({"id": note_id, "topic": topic})

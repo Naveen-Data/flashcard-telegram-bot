@@ -44,6 +44,7 @@ from studybot.db.settings import (
     set_study_window,
     update_streak,
 )
+from studybot.db.notes import add_session_note, list_session_notes
 from studybot.db.reviews import (
     apply_undo,
     clear_undo_snapshot,
@@ -81,6 +82,9 @@ __all__ = [
     "search_cards",
     "set_suspended",
     "snooze_card",
+    # notes
+    "add_session_note",
+    "list_session_notes",
     # settings
     "clear_exam",
     "get_daily_cap",
