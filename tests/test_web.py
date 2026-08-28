@@ -11,7 +11,7 @@ connection.DB_PATH = Path(tempfile.mkdtemp()) / "t.db"
 from starlette.testclient import TestClient  # noqa: E402
 
 from studybot import db  # noqa: E402
-from studybot.mcp.server import mcp_server  # noqa: E402
+from studybot.mcp.server import build_app  # noqa: E402
 from studybot.review import card_payload  # noqa: E402
 
 db.init_db()
@@ -25,7 +25,7 @@ p = card_payload(db.get_card(cloze))
 assert p["front"] == "The [...] is the powerhouse", p["front"]
 assert p["back"] == "The mitochondria is the powerhouse", p["back"]
 
-client = TestClient(mcp_server.streamable_http_app(streamable_http_path="/mcp"))
+client = TestClient(build_app())
 
 assert "<title>Study</title>" in client.get("/app").text
 
@@ -59,5 +59,12 @@ assert client.get("/api/cards?q=zzzznope").json() == []
 s = client.get("/api/stats").json()
 assert s["deck"]["total"] == 2
 assert len(s["forecast"]) == 8
+
+# CORS: the deployed frontend lives on a different origin (Vercel) from the
+# backend (Oracle VM), and the dev-server origin must work without any env var.
+r = client.get("/api/due", headers={"Origin": "http://localhost:5173"})
+assert r.headers.get("access-control-allow-origin") == "http://localhost:5173", dict(r.headers)
+r = client.get("/api/due", headers={"Origin": "https://evil.example.com"})
+assert "access-control-allow-origin" not in r.headers, "must not reflect arbitrary origins"
 
 print("web api ok")
