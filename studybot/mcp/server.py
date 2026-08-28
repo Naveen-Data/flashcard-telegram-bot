@@ -4,6 +4,7 @@ import os
 from typing import Optional
 
 from mcp.server.mcpserver import MCPServer
+from starlette.middleware.cors import CORSMiddleware
 
 from studybot import db
 
@@ -213,11 +214,38 @@ def get_weak_cards() -> list[dict]:
     return db.list_weak_cards(chat_id)
 
 
+from studybot.web import register as _register_web  # noqa: E402
+
+_register_web(mcp_server)
+
+# The web frontend (studybot-web) is deployed separately on Vercel, so browser
+# requests to /api/* and /app cross origins. Vite's dev-server ports are allowed
+# unconditionally so local frontend dev needs no env var; the deployed Vercel
+# origin(s) come from WEB_ALLOWED_ORIGINS (comma-separated) once that's known.
+_DEV_ORIGINS = [
+    "http://localhost:5173", "http://127.0.0.1:5173",
+    "http://localhost:5183", "http://127.0.0.1:5183",
+]
+
+
+def build_app(host: str = "127.0.0.1"):
+    app = mcp_server.streamable_http_app(streamable_http_path="/mcp", host=host)
+    extra_origins = [o.strip() for o in os.environ.get("WEB_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+    return CORSMiddleware(
+        app,
+        allow_origins=_DEV_ORIGINS + extra_origins,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type"],
+    )
+
+
 def run() -> None:
+    import uvicorn
+
     host = os.environ.get("MCP_HOST", "127.0.0.1")
     port = int(os.environ.get("MCP_PORT", "8811"))
     logger.info("Starting MCP server on http://%s:%d/mcp", host, port)
-    asyncio.run(mcp_server.run_streamable_http_async(host=host, port=port, streamable_http_path="/mcp"))
+    uvicorn.run(build_app(host=host), host=host, port=port, log_level="info")
 
 
 if __name__ == "__main__":
