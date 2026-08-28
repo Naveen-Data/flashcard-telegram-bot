@@ -214,6 +214,35 @@ def get_weak_cards() -> list[dict]:
     return db.list_weak_cards(chat_id)
 
 
+@mcp_server.tool()
+def add_session_note(topic: str, content: str, tags: str = "") -> dict:
+    """Save a note from a study session (a summary, what was covered, traps to watch for).
+
+    Separate from a card's own `notes` field — this is session-level, not tied to
+    one card. Use at the end of a study-session to persist the "what we covered"
+    summary so it shows up in the web app later.
+
+    Args:
+        topic: Short label for the session, e.g. 'RAG advanced retrieval'.
+        content: The note body — summary, key ideas, traps. Markdown/plain text fine.
+        tags: Optional comma-separated, e.g. 'rag,advanced'.
+    """
+    chat_id = db.get_registered_chat_id()
+    if chat_id is None:
+        return _NO_CHAT
+    note_id = db.add_session_note(chat_id, topic, content, tags=tags.strip() or None)
+    return {"id": note_id, "topic": topic}
+
+
+@mcp_server.tool()
+def list_session_notes(limit: int = 20) -> list[dict]:
+    """Return the most recent study-session notes, newest first."""
+    chat_id = db.get_registered_chat_id()
+    if chat_id is None:
+        return []
+    return db.list_session_notes(chat_id, limit=limit)
+
+
 from studybot.web import register as _register_web  # noqa: E402
 
 _register_web(mcp_server)

@@ -53,6 +53,16 @@ def init_db() -> None:
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                topic TEXT NOT NULL,
+                content TEXT NOT NULL,
+                tags TEXT DEFAULT NULL,
+                created_at DATETIME NOT NULL
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS undo_snapshots (
                 chat_id INTEGER PRIMARY KEY,
                 card_id INTEGER NOT NULL,
