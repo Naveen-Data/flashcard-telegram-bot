@@ -33,10 +33,10 @@ anon = TestClient(build_app())
 assert anon.get("/api/auth/status").json() == {"registered": False}
 assert anon.get("/api/due").status_code == 401, "no session yet — must be rejected"
 
-r = anon.post("/api/auth/register", json={"username": "naveen", "password": "short"})
+r = anon.post("/api/auth/register", json={"username": "testuser", "password": "short"})
 assert r.status_code == 409, "under 8 chars must be rejected"
 
-r = anon.post("/api/auth/register", json={"username": "naveen", "password": "correct horse"})
+r = anon.post("/api/auth/register", json={"username": "testuser", "password": "test-fixture-pw-1"})
 assert r.status_code == 201, r.text
 token = r.json()["token"]
 assert token
@@ -46,8 +46,8 @@ assert anon.get("/api/auth/status").json() == {"registered": True}
 r = anon.post("/api/auth/register", json={"username": "someoneelse", "password": "whatever12"})
 assert r.status_code == 409, "a second account must be refused"
 
-assert anon.post("/api/auth/login", json={"username": "naveen", "password": "wrong"}).status_code == 401
-r = anon.post("/api/auth/login", json={"username": "naveen", "password": "correct horse"})
+assert anon.post("/api/auth/login", json={"username": "testuser", "password": "wrong"}).status_code == 401
+r = anon.post("/api/auth/login", json={"username": "testuser", "password": "test-fixture-pw-1"})
 assert r.status_code == 200 and r.json()["token"], "correct password must log in"
 
 client = TestClient(build_app(), headers={"Authorization": f"Bearer {token}"})
