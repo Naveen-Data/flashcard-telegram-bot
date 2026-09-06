@@ -163,6 +163,18 @@ r = anon.options("/api/tokens/1", headers={"Origin": "http://localhost:5173",
                                             "Access-Control-Request-Method": "DELETE"})
 check("CORS preflight allows DELETE (token revoke)", r.status_code < 400, r.text[:200])
 
+# claude.ai must be allowed to preflight /mcp when it's in WEB_ALLOWED_ORIGINS
+# (production always sets it there) — otherwise Claude's own client is blocked
+# by the browser before a bearer token is ever checked, which surfaces to the
+# user as "can't connect to a valid MCP server"
+os.environ["WEB_ALLOWED_ORIGINS"] = "https://claude.ai"
+with TestClient(build_app(host="0.0.0.0")) as claude_origin_client:
+    r = claude_origin_client.options("/mcp", headers={"Origin": "https://claude.ai", "Access-Control-Request-Method": "POST",
+                                                        "Access-Control-Request-Headers": "authorization,content-type"})
+    check("CORS preflight allows claude.ai to reach /mcp when configured",
+          r.status_code < 400 and r.headers.get("access-control-allow-origin") == "https://claude.ai", r.text[:200])
+del os.environ["WEB_ALLOWED_ORIGINS"]
+
 # --- /mcp: real per-user bearer tokens, no static shared secret --------------
 
 MCP_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}

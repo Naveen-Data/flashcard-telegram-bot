@@ -256,10 +256,13 @@ from studybot.web import register as _register_web  # noqa: E402
 
 _register_web(mcp_server)
 
-# The web frontend (studybot-web) is deployed separately on Vercel, so browser
-# requests to /api/* and /app cross origins. Vite's dev-server ports are allowed
-# unconditionally so local frontend dev needs no env var; the deployed Vercel
-# origin(s) come from WEB_ALLOWED_ORIGINS (comma-separated) once that's known.
+# The web frontend (studybot-web) is deployed separately on Vercel, and /mcp is
+# called directly by browser-based MCP clients (e.g. claude.ai), so both cross
+# origins. Vite's dev-server ports are allowed unconditionally so local frontend
+# dev needs no env var; every other allowed origin — the deployed Vercel origin,
+# https://claude.ai, anything else — comes from WEB_ALLOWED_ORIGINS
+# (comma-separated), set as a GitHub Actions repository *variable* (not a
+# secret — these aren't sensitive) and injected into .env at deploy time.
 _DEV_ORIGINS = [
     "http://localhost:5173", "http://127.0.0.1:5173",
     "http://localhost:5183", "http://127.0.0.1:5183",

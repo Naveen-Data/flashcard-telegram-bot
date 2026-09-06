@@ -28,7 +28,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           MCP_HOST: ${{ secrets.MCP_HOST }}
-          WEB_ALLOWED_ORIGINS: ${{ secrets.WEB_ALLOWED_ORIGINS }}
+          WEB_ALLOWED_ORIGINS: ${{ vars.WEB_ALLOWED_ORIGINS }}
           PGHOST: ${{ secrets.PGHOST }}
           PGPORT: ${{ secrets.PGPORT }}
           PGUSER: ${{ secrets.PGUSER }}
