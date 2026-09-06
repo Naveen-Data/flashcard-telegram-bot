@@ -260,17 +260,17 @@ _register_web(mcp_server)
 # requests to /api/* and /app cross origins. Vite's dev-server ports are allowed
 # unconditionally so local frontend dev needs no env var; the deployed Vercel
 # origin(s) come from WEB_ALLOWED_ORIGINS (comma-separated) once that's known.
-#
-# claude.ai is allowed unconditionally too: /mcp exists specifically for MCP
-# clients like Claude to call, and Claude's web/desktop client runs the actual
-# request from that origin — without it, the browser blocks the request with
-# a CORS preflight failure before a bearer token is ever checked, which looks
-# to the client like "can't connect to a valid MCP server" rather than a 401.
 _DEV_ORIGINS = [
     "http://localhost:5173", "http://127.0.0.1:5173",
     "http://localhost:5183", "http://127.0.0.1:5183",
-    "https://claude.ai",
 ]
+
+# Not a dev convenience — required in every environment. /mcp exists specifically
+# for MCP clients like Claude to call, and Claude's web/desktop client runs the
+# actual request from this origin. Without it, the browser blocks the request
+# with a CORS preflight failure before a bearer token is ever checked, which
+# looks to the client like "can't connect to a valid MCP server" rather than a 401.
+_MCP_CLIENT_ORIGINS = ["https://claude.ai"]
 
 # register/login/logout stay reachable without a credential — someone has to be
 # able to log in before anything else is possible. Everything else under
@@ -392,7 +392,7 @@ def build_app(host: str = "127.0.0.1"):
     extra_origins = [o.strip() for o in os.environ.get("WEB_ALLOWED_ORIGINS", "").split(",") if o.strip()]
     return CORSMiddleware(
         app,
-        allow_origins=_DEV_ORIGINS + extra_origins,
+        allow_origins=_DEV_ORIGINS + _MCP_CLIENT_ORIGINS + extra_origins,
         allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Content-Type", "Authorization"],
     )
