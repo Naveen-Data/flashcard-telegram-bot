@@ -1,88 +1,88 @@
-from datetime import datetime, timedelta
+"""Per-user settings (study window, cap, retention, exams, DND, streaks) and
+app-wide config. There is no more single global "registered chat" — Telegram
+identity now lives in studybot.db.users, resolved to a user_id per request.
+"""
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+from sqlalchemy import text
 
 from studybot.db.connection import get_connection
 from studybot.fsrs import DEFAULT_RETENTION
 
-_IST = timedelta(hours=5, minutes=30)
+IST = timedelta(hours=5, minutes=30)
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _now_ist() -> datetime:
-    return datetime.utcnow() + _IST
-
-
-def get_registered_chat_id() -> Optional[int]:
-    with get_connection() as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key='chat_id'").fetchone()
-        return int(row["value"]) if row else None
-
-
-def set_registered_chat_id(chat_id: int) -> None:
-    with get_connection() as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES ('chat_id', ?)",
-            (str(chat_id),),
-        )
-        conn.commit()
+    return _now() + IST
 
 
 def get_global_setting(key: str) -> Optional[str]:
     with get_connection() as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-        return row["value"] if row else None
+        return conn.execute(
+            text("SELECT value FROM app_settings WHERE key=:k"), {"k": key}
+        ).scalar()
 
 
 def set_global_setting(key: str, value: str) -> None:
     with get_connection() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", (key, value)
+            text(
+                "INSERT INTO app_settings (key, value) VALUES (:k, :v)"
+                " ON CONFLICT (key) DO UPDATE SET value=:v"
+            ),
+            {"k": key, "v": value},
         )
-        conn.commit()
 
 
-def get_setting(chat_id: int, key: str) -> Optional[str]:
+def get_setting(user_id: int, key: str) -> Optional[str]:
     with get_connection() as conn:
-        row = conn.execute(
-            "SELECT value FROM chat_settings WHERE chat_id=? AND key=?", (chat_id, key)
-        ).fetchone()
-        return row["value"] if row else None
+        return conn.execute(
+            text("SELECT value FROM user_settings WHERE user_id=:u AND key=:k"),
+            {"u": user_id, "k": key},
+        ).scalar()
 
 
-def set_setting(chat_id: int, key: str, value: str) -> None:
+def set_setting(user_id: int, key: str, value: str) -> None:
     with get_connection() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO chat_settings (chat_id, key, value) VALUES (?,?,?)",
-            (chat_id, key, value),
+            text(
+                "INSERT INTO user_settings (user_id, key, value) VALUES (:u, :k, :v)"
+                " ON CONFLICT (user_id, key) DO UPDATE SET value=:v"
+            ),
+            {"u": user_id, "k": key, "v": value},
         )
-        conn.commit()
 
 
-def set_daily_goal(chat_id: int, goal: int) -> None:
-    set_setting(chat_id, "daily_goal", str(goal))
+def set_daily_goal(user_id: int, goal: int) -> None:
+    set_setting(user_id, "daily_goal", str(goal))
 
 
-def get_study_window(chat_id: int) -> Optional[str]:
-    raw = get_setting(chat_id, "study_window")
-    return raw or None
+def get_study_window(user_id: int) -> Optional[str]:
+    return get_setting(user_id, "study_window") or None
 
 
-def set_study_window(chat_id: int, window: Optional[str]) -> None:
-    set_setting(chat_id, "study_window", window or "")
+def set_study_window(user_id: int, window: Optional[str]) -> None:
+    set_setting(user_id, "study_window", window or "")
 
 
-def get_daily_cap(chat_id: int) -> Optional[int]:
-    raw = get_setting(chat_id, "daily_cap")
+def get_daily_cap(user_id: int) -> Optional[int]:
+    raw = get_setting(user_id, "daily_cap")
     if not raw or not raw.isdigit() or int(raw) <= 0:
         return None
     return int(raw)
 
 
-def set_daily_cap(chat_id: int, cap: Optional[int]) -> None:
-    set_setting(chat_id, "daily_cap", str(cap) if cap else "")
+def set_daily_cap(user_id: int, cap: Optional[int]) -> None:
+    set_setting(user_id, "daily_cap", str(cap) if cap else "")
 
 
-def get_desired_retention(chat_id: int) -> float:
-    raw = get_setting(chat_id, "desired_retention")
+def get_desired_retention(user_id: int) -> float:
+    raw = get_setting(user_id, "desired_retention")
     try:
         value = float(raw) if raw else DEFAULT_RETENTION
     except ValueError:
@@ -90,58 +90,57 @@ def get_desired_retention(chat_id: int) -> float:
     return min(0.99, max(0.7, value))
 
 
-def set_desired_retention(chat_id: int, retention: float) -> None:
-    set_setting(chat_id, "desired_retention", str(round(retention, 3)))
+def set_desired_retention(user_id: int, retention: float) -> None:
+    set_setting(user_id, "desired_retention", str(round(retention, 3)))
 
 
-def set_exam(chat_id: int, tag: str, date_str: str) -> None:
-    set_setting(chat_id, f"exam:{tag}", date_str)
+def set_exam(user_id: int, tag: str, date_str: str) -> None:
+    set_setting(user_id, f"exam:{tag}", date_str)
 
 
-def clear_exam(chat_id: int, tag: str) -> None:
-    set_setting(chat_id, f"exam:{tag}", "")
+def clear_exam(user_id: int, tag: str) -> None:
+    set_setting(user_id, f"exam:{tag}", "")
 
 
-def list_exams(chat_id: int) -> list[tuple[str, str]]:
+def list_exams(user_id: int) -> list[tuple[str, str]]:
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT key, value FROM chat_settings WHERE chat_id=? AND key LIKE 'exam:%'",
-            (chat_id,),
-        ).fetchall()
-    return sorted(
-        (row["key"].split(":", 1)[1], row["value"]) for row in rows if row["value"]
-    )
+            text("SELECT key, value FROM user_settings WHERE user_id=:u AND key LIKE 'exam:%'"),
+            {"u": user_id},
+        )
+        rows = list(rows)
+    return sorted((r.key.split(":", 1)[1], r.value) for r in rows if r.value)
 
 
-def get_exam_date_for_card(chat_id: int, tags: Optional[str]) -> Optional[str]:
+def get_exam_date_for_card(user_id: int, tags: Optional[str]) -> Optional[str]:
     """Soonest upcoming exam among a card's tags, if any."""
     if not tags:
         return None
-    exams = dict(list_exams(chat_id))
+    exams = dict(list_exams(user_id))
     if not exams:
         return None
     dates = [exams[t.strip()] for t in tags.split(",") if t.strip() in exams]
     return min(dates) if dates else None
 
 
-def get_dnd_window(chat_id: int) -> Optional[tuple[str, str]]:
+def get_dnd_window(user_id: int) -> Optional[tuple[str, str]]:
     """Returns (start_hhmm, end_hhmm) in IST, or None if not set."""
-    raw = get_setting(chat_id, "dnd_window")
+    raw = get_setting(user_id, "dnd_window")
     if not raw or "-" not in raw:
         return None
     start, end = raw.split("-", 1)
     return start, end
 
 
-def set_dnd_window(chat_id: int, start_hhmm: Optional[str], end_hhmm: Optional[str]) -> None:
+def set_dnd_window(user_id: int, start_hhmm: Optional[str], end_hhmm: Optional[str]) -> None:
     if start_hhmm is None or end_hhmm is None:
-        set_setting(chat_id, "dnd_window", "")
+        set_setting(user_id, "dnd_window", "")
     else:
-        set_setting(chat_id, "dnd_window", f"{start_hhmm}-{end_hhmm}")
+        set_setting(user_id, "dnd_window", f"{start_hhmm}-{end_hhmm}")
 
 
-def is_within_dnd(chat_id: int) -> bool:
-    window = get_dnd_window(chat_id)
+def is_within_dnd(user_id: int) -> bool:
+    window = get_dnd_window(user_id)
     if not window or not window[0]:
         return False
     start_str, end_str = window
@@ -155,41 +154,41 @@ def is_within_dnd(chat_id: int) -> bool:
     return now >= start or now <= end  # window wraps past midnight
 
 
-def update_streak(chat_id: int) -> None:
+def update_streak(user_id: int) -> None:
     today = _now_ist().date().isoformat()
     yesterday = (_now_ist() - timedelta(days=1)).date().isoformat()
     with get_connection() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-
-        def _get(key):
-            row = conn.execute(
-                "SELECT value FROM chat_settings WHERE chat_id=? AND key=?", (chat_id, key)
-            ).fetchone()
-            return row["value"] if row else None
-
-        def _set(key, value):
-            conn.execute(
-                "INSERT OR REPLACE INTO chat_settings (chat_id, key, value) VALUES (?,?,?)",
-                (chat_id, key, value),
-            )
-
-        last = _get("streak_last_date")
+        last = conn.execute(
+            text("SELECT value FROM user_settings WHERE user_id=:u AND key='streak_last_date'"),
+            {"u": user_id},
+        ).scalar()
         if last == today:
-            conn.execute("ROLLBACK")
             return
-        current = int(_get("streak_current") or "0")
-        longest = int(_get("streak_longest") or "0")
+        current = int(conn.execute(
+            text("SELECT value FROM user_settings WHERE user_id=:u AND key='streak_current'"),
+            {"u": user_id},
+        ).scalar() or "0")
+        longest = int(conn.execute(
+            text("SELECT value FROM user_settings WHERE user_id=:u AND key='streak_longest'"),
+            {"u": user_id},
+        ).scalar() or "0")
         current = current + 1 if last == yesterday else 1
         longest = max(longest, current)
-        _set("streak_last_date", today)
-        _set("streak_current", str(current))
-        _set("streak_longest", str(longest))
-        conn.commit()
+        for key, value in (
+            ("streak_last_date", today), ("streak_current", str(current)), ("streak_longest", str(longest)),
+        ):
+            conn.execute(
+                text(
+                    "INSERT INTO user_settings (user_id, key, value) VALUES (:u, :k, :v)"
+                    " ON CONFLICT (user_id, key) DO UPDATE SET value=:v"
+                ),
+                {"u": user_id, "k": key, "v": value},
+            )
 
 
-def get_streak_info(chat_id: int) -> dict:
+def get_streak_info(user_id: int) -> dict:
     return {
-        "current": int(get_setting(chat_id, "streak_current") or "0"),
-        "longest": int(get_setting(chat_id, "streak_longest") or "0"),
-        "last_date": get_setting(chat_id, "streak_last_date"),
+        "current": int(get_setting(user_id, "streak_current") or "0"),
+        "longest": int(get_setting(user_id, "streak_longest") or "0"),
+        "last_date": get_setting(user_id, "streak_last_date"),
     }

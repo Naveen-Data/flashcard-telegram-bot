@@ -1,5 +1,6 @@
 import io
 from datetime import datetime, time as dtime, timedelta, timezone
+from typing import Optional
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -11,9 +12,23 @@ from studybot.bot.jobs import daily_digest, pomodoro_done
 from studybot.fsrs import LEECH_THRESHOLD
 
 
+def _user_id(update: Update) -> Optional[int]:
+    """Resolve the canonical user for this Telegram chat. None if /start hasn't run."""
+    return db.get_user_id_for_telegram(update.effective_user.id, update.effective_chat.id)
+
+
+async def _require_user(update: Update) -> Optional[int]:
+    user_id = _user_id(update)
+    if user_id is None:
+        await update.message.reply_text("Send /start first.")
+    return user_id
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    db.set_registered_chat_id(chat_id)
+    db.get_or_create_telegram_user(
+        update.effective_user.id, update.effective_chat.id,
+        update.effective_user.username, update.effective_user.full_name,
+    )
     await update.message.reply_text(
         "✅ Registered! I'll notify you when cards are due.\n\n"
         "Add a card:\n`add: question / answer`\n"
@@ -66,22 +81,25 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def review_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
     chat_id = update.effective_chat.id
     args = [a.lstrip("#").lower() for a in (context.args or [])]
     review_all = "all" in args
     force = "force" in args
     tag = next((a for a in args if a not in ("all", "force")), None)
 
-    cards = db.list_all_cards(chat_id, tag=tag) if review_all else db.list_due_cards(chat_id, tag=tag)
+    cards = db.list_all_cards(user_id, tag=tag) if review_all else db.list_due_cards(user_id, tag=tag)
     if not cards:
         suffix = f" for #{tag}" if tag else ""
         await update.message.reply_text(f"No cards due{suffix}! 🎉")
         return
 
     capped_note = ""
-    cap = db.get_daily_cap(chat_id)
+    cap = db.get_daily_cap(user_id)
     if cap and not force:
-        done_today = db.count_reviews_today(chat_id)
+        done_today = db.count_reviews_today(user_id)
         remaining = cap - done_today
         if remaining <= 0:
             await update.message.reply_text(
@@ -105,12 +123,14 @@ async def review_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(
         f"Starting review{suffix}: {len(cards)} card(s).{capped_note}"
     )
-    await send_next_card(context, chat_id)
+    await send_next_card(context, user_id, chat_id)
 
 
 async def tags_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    tags = db.list_tags(chat_id)
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
+    tags = db.list_tags(user_id)
     if not tags:
         await update.message.reply_text(
             "No tags yet. Add cards with #tags:\n`add: question / answer #topic`",
@@ -125,12 +145,14 @@ async def tags_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
     if not context.args:
         await update.message.reply_text("Usage: /search keyword")
         return
     keyword = " ".join(context.args)
-    results = db.search_cards(chat_id, keyword)
+    results = db.search_cards(user_id, keyword)
     if not results:
         await update.message.reply_text(f'No cards found for "{keyword}".')
         return
@@ -147,12 +169,14 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def streak_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    info = db.get_streak_info(chat_id)
-    goal = int(db.get_setting(chat_id, "daily_goal") or "0")
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
+    info = db.get_streak_info(user_id)
+    goal = int(db.get_setting(user_id, "daily_goal") or "0")
     today_count_str = ""
     if goal > 0:
-        done_today = db.count_reviews_today(chat_id)
+        done_today = db.count_reviews_today(user_id)
         bar = utils.progress_bar(done_today, goal)
         today_count_str = f"\n\n🎯 Today: {bar} {done_today}/{goal}"
     current = info["current"]
@@ -167,11 +191,13 @@ async def streak_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    forecast = db.get_forecast(chat_id, days=7)
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
+    forecast = db.get_forecast(user_id, days=7)
     counts = [c for _, c in forecast]
     peak = max(counts) if counts else 0
-    cap = db.get_daily_cap(chat_id)
+    cap = db.get_daily_cap(user_id)
 
     lines = ["📅 *Upcoming reviews*\n"]
     for label, count in forecast:
@@ -190,9 +216,11 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    stats = db.get_retention_stats(chat_id, days=30)
-    deck = db.get_stats(chat_id)
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
+    stats = db.get_retention_stats(user_id, days=30)
+    deck = db.get_stats(user_id)
 
     if stats["reviews"] == 0:
         await update.message.reply_text(
@@ -214,21 +242,25 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def goal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
     if not context.args or not context.args[0].isdigit():
-        current = db.get_setting(chat_id, "daily_goal") or "not set"
+        current = db.get_setting(user_id, "daily_goal") or "not set"
         await update.message.reply_text(f"Current goal: {current} cards/day\nUsage: /goal 10")
         return
     goal = int(context.args[0])
-    db.set_daily_goal(chat_id, goal)
+    db.set_daily_goal(user_id, goal)
     await update.message.reply_text(f"✅ Daily goal set to {goal} cards.")
 
 
 async def cap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
     args = context.args or []
     if not args:
-        cap = db.get_daily_cap(chat_id)
+        cap = db.get_daily_cap(user_id)
         current = f"{cap} cards/day" if cap else "off"
         await update.message.reply_text(
             f"Daily review cap: {current}\n"
@@ -237,22 +269,24 @@ async def cap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
     if args[0].lower() == "off":
-        db.set_daily_cap(chat_id, None)
+        db.set_daily_cap(user_id, None)
         await update.message.reply_text("✅ Daily cap removed.")
         return
     if not args[0].isdigit() or int(args[0]) <= 0:
         await update.message.reply_text("❌ Usage: /cap 20  (or /cap off)")
         return
     cap = int(args[0])
-    db.set_daily_cap(chat_id, cap)
+    db.set_daily_cap(user_id, cap)
     await update.message.reply_text(f"✅ Daily cap set to {cap} cards.")
 
 
 async def window_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
     args = context.args or []
     if not args:
-        window = db.get_study_window(chat_id)
+        window = db.get_study_window(user_id)
         current = window if window else "off (cards come due at whatever time they were reviewed)"
         await update.message.reply_text(
             f"📖 Study window: {current}\n\n"
@@ -261,13 +295,13 @@ async def window_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
     if args[0].lower() == "off":
-        db.set_study_window(chat_id, None)
+        db.set_study_window(user_id, None)
         await update.message.reply_text("✅ Study window disabled.")
         return
     if scheduling.parse_window(args[0]) is None:
         await update.message.reply_text("❌ Usage: /window 21:00-23:00  (or /window off)")
         return
-    db.set_study_window(chat_id, args[0])
+    db.set_study_window(user_id, args[0])
     await update.message.reply_text(
         f"✅ Study window set to {args[0]} IST.\n"
         "Cards reviewed from now on will come due inside it."
@@ -275,10 +309,12 @@ async def window_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def retention_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
     args = context.args or []
     if not args:
-        current = db.get_desired_retention(chat_id)
+        current = db.get_desired_retention(user_id)
         await update.message.reply_text(
             f"🎯 Target retention: {current:.0%}\n\n"
             "Higher = see cards more often, remember more, more work.\n"
@@ -293,18 +329,20 @@ async def retention_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     except ValueError:
         await update.message.reply_text("❌ Usage: /retention 0.9  (between 0.70 and 0.99)")
         return
-    db.set_desired_retention(chat_id, value)
+    db.set_desired_retention(user_id, value)
     await update.message.reply_text(
         f"✅ Target retention set to {value:.0%}. Applies from your next review."
     )
 
 
 async def exam_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
     args = context.args or []
 
     if not args or args[0].lower() == "list":
-        exams = db.list_exams(chat_id)
+        exams = db.list_exams(user_id)
         if not exams:
             await update.message.reply_text(
                 "No exams set.\n"
@@ -330,7 +368,7 @@ async def exam_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.message.reply_text("Usage: /exam clear <tag>")
             return
         tag = args[1].lstrip("#")
-        db.clear_exam(chat_id, tag)
+        db.clear_exam(user_id, tag)
         await update.message.reply_text(f"✅ Exam cleared for #{tag}.")
         return
 
@@ -348,7 +386,7 @@ async def exam_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if days < 0:
         await update.message.reply_text("❌ That date is in the past.")
         return
-    db.set_exam(chat_id, tag, date_str)
+    db.set_exam(user_id, tag, date_str)
     await update.message.reply_text(
         f"🎓 Exam set: #{tag} on {date_str} ({days}d away).\n"
         f"Intervals for #{tag} will now be capped so you always get another look before then."
@@ -356,6 +394,7 @@ async def exam_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def setdigest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Global: one shared digest schedule, per-user content — see studybot/bot/jobs.py.
     if not context.args:
         saved = db.get_global_setting("digest_time_ist") or "13:00"
         await update.message.reply_text(f"Daily digest is at {saved} IST.\nChange: /setdigest 14:00")
@@ -379,10 +418,12 @@ async def setdigest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def dnd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
     args = context.args or []
     if not args:
-        window = db.get_dnd_window(chat_id)
+        window = db.get_dnd_window(user_id)
         if window and window[0]:
             await update.message.reply_text(
                 f"🔕 DND: {window[0]}–{window[1]} IST\nChange: /dnd HH:MM-HH:MM or /dnd off"
@@ -393,7 +434,7 @@ async def dnd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
         return
     if args[0].lower() == "off":
-        db.set_dnd_window(chat_id, None, None)
+        db.set_dnd_window(user_id, None, None)
         await update.message.reply_text("🔔 DND turned off.")
         return
     window = scheduling.parse_window(args[0])
@@ -402,7 +443,7 @@ async def dnd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     start, end = window
     db.set_dnd_window(
-        chat_id, f"{start.hour:02d}:{start.minute:02d}", f"{end.hour:02d}:{end.minute:02d}"
+        user_id, f"{start.hour:02d}:{start.minute:02d}", f"{end.hour:02d}:{end.minute:02d}"
     )
     await update.message.reply_text(
         f"🔕 DND set: {start.hour:02d}:{start.minute:02d}–{end.hour:02d}:{end.minute:02d} IST"
@@ -424,16 +465,14 @@ async def pomodoro_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
     args = context.args or []
     if not args or not args[0].isdigit():
         await update.message.reply_text("Usage: /edit <id> question / answer")
         return
     card_id = int(args[0])
-    card = db.get_card(card_id)
-    if card is None or card["chat_id"] != chat_id:
-        await update.message.reply_text(f"❌ Card #{card_id} not found.")
-        return
     body = " ".join(args[1:]).strip()
     if " / " not in body:
         await update.message.reply_text("Usage: /edit <id> question / answer")
@@ -446,41 +485,43 @@ async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not question or not answer:
         await update.message.reply_text("❌ Both question and answer must be non-empty.")
         return
-    db.edit_card(card_id, question=question, answer=answer, tags=tags)
+    if not db.edit_card(user_id, card_id, question=question, answer=answer, tags=tags):
+        await update.message.reply_text(f"❌ Card #{card_id} not found.")
+        return
     await update.message.reply_text(f"✅ Card #{card_id} updated.")
 
 
 async def note_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
     args = context.args or []
     if not args or not args[0].isdigit():
         await update.message.reply_text("Usage: /note <id> your note here")
         return
     card_id = int(args[0])
-    card = db.get_card(card_id)
-    if card is None or card["chat_id"] != chat_id:
-        await update.message.reply_text(f"❌ Card #{card_id} not found.")
-        return
     note = " ".join(args[1:]).strip()
     if not note:
         await update.message.reply_text("Usage: /note <id> your note here")
         return
-    db.edit_card(card_id, notes=note)
+    if not db.edit_card(user_id, card_id, notes=note):
+        await update.message.reply_text(f"❌ Card #{card_id} not found.")
+        return
     await update.message.reply_text(f"📝 Note saved on card #{card_id} — shown when you reveal it.")
 
 
 async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
     args = context.args or []
     if not args or not args[0].isdigit():
         await update.message.reply_text("Usage: /delete <id>")
         return
     card_id = int(args[0])
-    card = db.get_card(card_id)
-    if card is None or card["chat_id"] != chat_id:
+    if not db.delete_card(user_id, card_id):
         await update.message.reply_text(f"❌ Card #{card_id} not found.")
         return
-    db.delete_card(card_id)
     await update.message.reply_text(f"🗑 Card #{card_id} deleted.")
 
 
@@ -495,18 +536,18 @@ async def unsuspend_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def _set_suspended(
     update: Update, context: ContextTypes.DEFAULT_TYPE, suspended: bool
 ) -> None:
-    chat_id = update.effective_chat.id
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
     verb = "suspend" if suspended else "unsuspend"
     args = context.args or []
     if not args or not args[0].isdigit():
         await update.message.reply_text(f"Usage: /{verb} <id>")
         return
     card_id = int(args[0])
-    card = db.get_card(card_id)
-    if card is None or card["chat_id"] != chat_id:
+    if not db.set_suspended(user_id, card_id, suspended):
         await update.message.reply_text(f"❌ Card #{card_id} not found.")
         return
-    db.set_suspended(card_id, suspended)
     if suspended:
         await update.message.reply_text(
             f"⏸ Card #{card_id} suspended — out of rotation until /unsuspend {card_id}."
@@ -516,8 +557,10 @@ async def _set_suspended(
 
 
 async def suspended_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    cards = db.list_suspended(chat_id)
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
+    cards = db.list_suspended(user_id)
     if not cards:
         await update.message.reply_text("No suspended cards.")
         return
@@ -529,33 +572,37 @@ async def suspended_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def bury_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
     args = context.args or []
     if not args or not args[0].isdigit():
         await update.message.reply_text("Usage: /bury <id>")
         return
     card_id = int(args[0])
-    card = db.get_card(card_id)
-    if card is None or card["chat_id"] != chat_id:
+    if not db.bury_card(user_id, card_id):
         await update.message.reply_text(f"❌ Card #{card_id} not found.")
         return
-    db.bury_card(card_id)
     await update.message.reply_text(
         f"🫥 Card #{card_id} buried until tomorrow — its schedule is untouched."
     )
 
 
 async def undo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    if db.apply_undo(chat_id):
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
+    if db.apply_undo(user_id):
         await update.message.reply_text("↩️ Last answer undone.")
     else:
         await update.message.reply_text("Nothing to undo.")
 
 
 async def leeches_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    leeches = db.list_leeches(chat_id)
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
+    leeches = db.list_leeches(user_id)
     if not leeches:
         await update.message.reply_text("No leeches — nothing you're stuck on right now. 🎉")
         return
@@ -570,28 +617,35 @@ async def leeches_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    data = db.export_backup(chat_id)
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
+    data = db.export_backup(user_id)
     buf = io.BytesIO(data.encode("utf-8"))
     filename = f"studybot_backup_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
     await update.message.reply_document(document=buf, filename=filename, caption="📦 Your backup.")
 
 
 async def card_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
     args = context.args or []
     if not args or not args[0].isdigit():
         await update.message.reply_text("Usage: /card <id>")
         return
     card_id = int(args[0])
-    card = db.get_card(card_id)
-    if card is None or card["chat_id"] != chat_id:
+    card = db.get_card(user_id, card_id)
+    if card is None:
         await update.message.reply_text(f"❌ Card #{card_id} not found.")
         return
 
-    history = db.get_card_history(card_id, limit=5)
+    history = db.get_card_history(user_id, card_id, limit=5)
     labels = {1: "🔴", 3: "🟠", 4: "🟢", 5: "🔵"}
-    hist_lines = [f"  {labels.get(h['quality'], '?')} {h['reviewed_at'][:16]}" for h in history]
+    hist_lines = [
+        f"  {labels.get(h['quality'], '?')} {h['reviewed_at'].strftime('%Y-%m-%d %H:%M')}"
+        for h in history
+    ]
     hist_str = "\n".join(hist_lines) if hist_lines else "  No reviews yet."
 
     if card["stability"] is not None:
@@ -618,17 +672,20 @@ async def card_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"A: {utils.clip(card['answer'], 300)}\n"
         f"Tags: {card['tags'] or 'none'}{notes_str}\n\n"
         f"{memory}\n"
-        f"Due: {card['due_at'][:16]}\n\n"
+        f"Due: {card['due_at'].strftime('%Y-%m-%d %H:%M')}\n\n"
         f"Recent reviews:\n{hist_str}"
     )
 
 
 async def handle_add_card(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
     text = update.message.text.strip()
     lower = text.lower()
 
     if lower.startswith("cloze:"):
-        await _add_cloze_card(update, text[6:].strip())
+        await _add_cloze_card(update, user_id, text[6:].strip())
         return
 
     if not lower.startswith("add:"):
@@ -654,19 +711,18 @@ async def handle_add_card(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text("❌ Both question and answer must be non-empty.")
         return
 
-    chat_id = update.effective_chat.id
     tag_str = f" | 🏷 {tags}" if tags else ""
     if make_reverse:
-        forward_id, reverse_id = db.add_card_with_reverse(question, answer, chat_id, tags=tags)
+        forward_id, reverse_id = db.add_card_with_reverse(question, answer, user_id, tags=tags)
         await update.message.reply_text(
             f"✅ Cards #{forward_id} and #{reverse_id} added (both directions).{tag_str}"
         )
     else:
-        card_id = db.add_card(question, answer, chat_id, tags=tags)
+        card_id = db.add_card(question, answer, user_id, tags=tags)
         await update.message.reply_text(f"✅ Card #{card_id} added.{tag_str}")
 
 
-async def _add_cloze_card(update: Update, body: str) -> None:
+async def _add_cloze_card(update: Update, user_id: int, body: str) -> None:
     if not utils.is_cloze_text(body):
         await update.message.reply_text(
             "❌ No {{c1::...}} cloze found. Format: cloze: The {{c1::answer}} is hidden."
@@ -675,13 +731,15 @@ async def _add_cloze_card(update: Update, body: str) -> None:
     tags_found = utils.TAG_RE.findall(body)
     clean_text = utils.TAG_RE.sub("", body).strip()
     tags = ",".join(tags_found) if tags_found else None
-    chat_id = update.effective_chat.id
-    card_id = db.add_card(clean_text, "", chat_id, tags=tags, card_type="cloze")
+    card_id = db.add_card(clean_text, "", user_id, tags=tags, card_type="cloze")
     tag_str = f" | 🏷 {tags}" if tags else ""
     await update.message.reply_text(f"✅ Cloze card #{card_id} added.{tag_str}")
 
 
 async def handle_add_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = await _require_user(update)
+    if user_id is None:
+        return
     if not update.message.caption:
         return
     text = update.message.caption.strip()
@@ -699,8 +757,7 @@ async def handle_add_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not question or not answer:
         await update.message.reply_text("❌ Both question and answer must be non-empty.")
         return
-    chat_id = update.effective_chat.id
     image_file_id = update.message.photo[-1].file_id
-    card_id = db.add_card(question, answer, chat_id, tags=tags, image_file_id=image_file_id)
+    card_id = db.add_card(question, answer, user_id, tags=tags, image_file_id=image_file_id)
     tag_str = f" | 🏷 {tags}" if tags else ""
     await update.message.reply_text(f"✅ Card #{card_id} added with image.{tag_str}")

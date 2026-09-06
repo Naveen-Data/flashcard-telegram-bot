@@ -1,150 +1,41 @@
-import sqlite3
-from pathlib import Path
+"""PostgreSQL connection helpers; Alembic owns schema changes."""
+import os
+from contextlib import contextmanager
+from typing import Iterator
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Connection, Engine, URL
+from sqlalchemy.pool import QueuePool
 
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "cards.db"
+_engine: Engine | None = None
 
+def build_database_url() -> URL:
+    """Build the connection URL from PGHOST/PGUSER/PGPASSWORD/PGDATABASE/etc."""
+    missing = [k for k in ("PGHOST", "PGUSER", "PGPASSWORD", "PGDATABASE") if not os.environ.get(k)]
+    if missing:
+        raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
+    return URL.create(
+        "postgresql+psycopg",
+        username=os.environ["PGUSER"],
+        password=os.environ["PGPASSWORD"],
+        host=os.environ["PGHOST"],
+        port=int(os.environ.get("PGPORT", "5432")),
+        database=os.environ["PGDATABASE"],
+        query={"sslmode": os.environ.get("PGSSLMODE", "require")},
+    )
 
-def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+def get_engine() -> Engine:
+    global _engine
+    if _engine is None:
+        _engine = create_engine(build_database_url(), poolclass=QueuePool, pool_size=3,
+                                max_overflow=2, pool_pre_ping=True, pool_recycle=1800)
+    return _engine
 
+@contextmanager
+def get_connection() -> Iterator[Connection]:
+    with get_engine().begin() as connection:
+        yield connection
 
 def init_db() -> None:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with get_connection() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS cards (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                question TEXT NOT NULL,
-                answer TEXT NOT NULL,
-                stage INTEGER NOT NULL DEFAULT 0,
-                due_at DATETIME NOT NULL,
-                created_at DATETIME NOT NULL,
-                chat_id INTEGER NOT NULL,
-                tags TEXT DEFAULT NULL,
-                ease_factor REAL NOT NULL DEFAULT 2.5,
-                interval_days INTEGER NOT NULL DEFAULT 1,
-                repetitions INTEGER NOT NULL DEFAULT 0
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS chat_settings (
-                chat_id INTEGER NOT NULL,
-                key TEXT NOT NULL,
-                value TEXT NOT NULL,
-                PRIMARY KEY (chat_id, key)
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS review_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                card_id INTEGER NOT NULL,
-                chat_id INTEGER NOT NULL,
-                quality INTEGER NOT NULL,
-                reviewed_at DATETIME NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS session_notes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id INTEGER NOT NULL,
-                topic TEXT NOT NULL,
-                content TEXT NOT NULL,
-                tags TEXT DEFAULT NULL,
-                created_at DATETIME NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS web_auth (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                username TEXT NOT NULL,
-                salt TEXT NOT NULL,
-                password_hash TEXT NOT NULL,
-                created_at DATETIME NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS web_sessions (
-                token TEXT PRIMARY KEY,
-                created_at DATETIME NOT NULL,
-                expires_at DATETIME NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS undo_snapshots (
-                chat_id INTEGER PRIMARY KEY,
-                card_id INTEGER NOT NULL,
-                ease_factor REAL NOT NULL,
-                interval_days INTEGER NOT NULL,
-                repetitions INTEGER NOT NULL,
-                due_at DATETIME NOT NULL,
-                stage INTEGER NOT NULL,
-                consecutive_again INTEGER NOT NULL,
-                review_log_id INTEGER,
-                created_at DATETIME NOT NULL
-            )
-        """)
-        for col, typedef in [
-            ("stability", "REAL DEFAULT NULL"),
-            ("difficulty", "REAL DEFAULT NULL"),
-            ("last_review", "DATETIME DEFAULT NULL"),
-        ]:
-            try:
-                conn.execute(f"ALTER TABLE undo_snapshots ADD COLUMN {col} {typedef}")
-            except sqlite3.OperationalError:
-                pass
-        for col, typedef in [
-            ("tags", "TEXT DEFAULT NULL"),
-            ("ease_factor", "REAL NOT NULL DEFAULT 2.5"),
-            ("interval_days", "INTEGER NOT NULL DEFAULT 1"),
-            ("repetitions", "INTEGER NOT NULL DEFAULT 0"),
-            ("card_type", "TEXT NOT NULL DEFAULT 'basic'"),
-            ("image_file_id", "TEXT DEFAULT NULL"),
-            ("consecutive_again", "INTEGER NOT NULL DEFAULT 0"),
-            # FSRS state — NULL until a card's first review, then always set
-            ("stability", "REAL DEFAULT NULL"),
-            ("difficulty", "REAL DEFAULT NULL"),
-            ("last_review", "DATETIME DEFAULT NULL"),
-            ("notes", "TEXT DEFAULT NULL"),
-            ("suspended", "INTEGER NOT NULL DEFAULT 0"),
-            ("buried_until", "DATETIME DEFAULT NULL"),
-            ("reverse_of", "INTEGER DEFAULT NULL"),
-        ]:
-            try:
-                conn.execute(f"ALTER TABLE cards ADD COLUMN {col} {typedef}")
-            except sqlite3.OperationalError:
-                pass
-        _backfill_fsrs_state(conn)
-        conn.commit()
-
-
-def _backfill_fsrs_state(conn: sqlite3.Connection) -> None:
-    """Seed FSRS stability/difficulty for cards that predate the FSRS migration.
-
-    Only touches already-reviewed cards with no FSRS state yet; new cards are left
-    NULL so they initialise properly from their first real review.
-    """
-    from studybot.fsrs import seed_from_sm2
-
-    rows = conn.execute(
-        "SELECT id, ease_factor, interval_days, repetitions FROM cards"
-        " WHERE stability IS NULL AND repetitions > 0"
-    ).fetchall()
-    for row in rows:
-        stability, difficulty = seed_from_sm2(
-            row["ease_factor"], row["interval_days"], row["repetitions"]
-        )
-        if stability is None:
-            continue
-        conn.execute(
-            "UPDATE cards SET stability=?, difficulty=? WHERE id=?",
-            (stability, difficulty, row["id"]),
-        )
+    """Compatibility hook. Deployments must run ``alembic upgrade head`` first."""
+    with get_engine().connect():
+        pass

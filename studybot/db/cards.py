@@ -1,177 +1,212 @@
-from datetime import datetime, timedelta
+"""Card CRUD, review scheduling, and deck queries. Every function takes a
+`user_id` and every query is ownership-scoped in SQL — never fetch by a
+global card ID and check ownership afterwards in Python.
+"""
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+from sqlalchemy import text
 
 from studybot import fsrs, scheduling
 from studybot.db.connection import get_connection
 from studybot.fsrs import LEECH_THRESHOLD
 
-# Cards hidden from review: explicitly suspended, or buried until later today.
-_ACTIVE = "suspended=0 AND (buried_until IS NULL OR buried_until<=?)"
+_ACTIVE = "suspended = FALSE AND (buried_until IS NULL OR buried_until <= :now)"
 
 
-def _active_params(now_iso: str) -> tuple:
-    return (now_iso,)
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _canon_tags(tags: Optional[str]) -> Optional[str]:
+    """Trim/lowercase/dedupe so PostgreSQL array-containment matching is exact."""
+    if not tags:
+        return None
+    seen: list[str] = []
+    for t in tags.split(","):
+        t = t.strip().lower()
+        if t and t not in seen:
+            seen.append(t)
+    return ",".join(seen) if seen else None
+
+
+def _row(row) -> Optional[dict]:
+    return dict(row._mapping) if row is not None else None
 
 
 def add_card(
-    question: str, answer: str, chat_id: int, tags: Optional[str] = None,
+    question: str, answer: str, user_id: int, tags: Optional[str] = None,
     card_type: str = "basic", image_file_id: Optional[str] = None,
     notes: Optional[str] = None, reverse_of: Optional[int] = None,
 ) -> int:
-    now = datetime.utcnow()
-    due_at = (now + timedelta(days=1)).isoformat()
+    now = _now()
     with get_connection() as conn:
-        cursor = conn.execute(
-            "INSERT INTO cards (question, answer, stage, due_at, created_at, chat_id, tags,"
-            " ease_factor, interval_days, repetitions, card_type, image_file_id, notes, reverse_of)"
-            " VALUES (?,?,0,?,?,?,?,2.5,1,0,?,?,?,?)",
-            (question, answer, due_at, now.isoformat(), chat_id, tags, card_type,
-             image_file_id, notes, reverse_of),
-        )
-        conn.commit()
-        return cursor.lastrowid
+        return conn.execute(
+            text(
+                "INSERT INTO cards (question, answer, stage, due_at, created_at, user_id, tags,"
+                " ease_factor, interval_days, repetitions, card_type, image_file_id, notes, reverse_of)"
+                " VALUES (:q, :a, 0, :due, :created, :uid, :tags, 2.5, 1, 0, :ctype, :img, :notes, :rev)"
+                " RETURNING id"
+            ),
+            {
+                "q": question, "a": answer, "due": now + timedelta(days=1), "created": now,
+                "uid": user_id, "tags": _canon_tags(tags), "ctype": card_type,
+                "img": image_file_id, "notes": notes, "rev": reverse_of,
+            },
+        ).scalar_one()
 
 
 def add_card_with_reverse(
-    question: str, answer: str, chat_id: int, tags: Optional[str] = None,
+    question: str, answer: str, user_id: int, tags: Optional[str] = None,
     notes: Optional[str] = None,
 ) -> tuple[int, int]:
     """Create a card plus its mirror (answer->question), scheduled independently."""
-    forward_id = add_card(question, answer, chat_id, tags=tags, notes=notes)
-    reverse_id = add_card(answer, question, chat_id, tags=tags, notes=notes, reverse_of=forward_id)
+    forward_id = add_card(question, answer, user_id, tags=tags, notes=notes)
+    reverse_id = add_card(answer, question, user_id, tags=tags, notes=notes, reverse_of=forward_id)
     return forward_id, reverse_id
 
 
-def add_cards_bulk(cards: list[dict], chat_id: int) -> list[int]:
+def add_cards_bulk(cards: list[dict], user_id: int) -> list[int]:
     if not cards:
         return []
-    now = datetime.utcnow()
-    due_at = (now + timedelta(days=1)).isoformat()
-    now_iso = now.isoformat()
+    now = _now()
+    due = now + timedelta(days=1)
     ids: list[int] = []
     with get_connection() as conn:
         for card in cards:
-            cursor = conn.execute(
-                "INSERT INTO cards (question, answer, stage, due_at, created_at, chat_id, tags,"
-                " ease_factor, interval_days, repetitions, notes) VALUES (?,?,0,?,?,?,?,2.5,1,0,?)",
-                (card["question"], card["answer"], due_at, now_iso, chat_id,
-                 card.get("tags"), card.get("notes")),
-            )
-            ids.append(cursor.lastrowid)
-        conn.commit()
+            card_id = conn.execute(
+                text(
+                    "INSERT INTO cards (question, answer, stage, due_at, created_at, user_id, tags,"
+                    " ease_factor, interval_days, repetitions, notes)"
+                    " VALUES (:q, :a, 0, :due, :created, :uid, :tags, 2.5, 1, 0, :notes) RETURNING id"
+                ),
+                {
+                    "q": card["question"], "a": card["answer"], "due": due, "created": now,
+                    "uid": user_id, "tags": _canon_tags(card.get("tags")), "notes": card.get("notes"),
+                },
+            ).scalar_one()
+            ids.append(card_id)
     return ids
 
 
 def edit_card(
-    card_id: int, question: Optional[str] = None, answer: Optional[str] = None,
+    user_id: int, card_id: int, question: Optional[str] = None, answer: Optional[str] = None,
     tags: Optional[str] = None, notes: Optional[str] = None,
 ) -> bool:
-    """Update whichever fields are provided. Returns False if the card doesn't exist."""
+    """Update whichever fields are provided. Returns False if the card doesn't exist or isn't owned."""
+    updates: list[str] = []
+    params: dict = {"uid": user_id, "id": card_id}
+    for column, value, transform in (
+        ("question", question, None), ("answer", answer, None),
+        ("tags", tags, _canon_tags), ("notes", notes, None),
+    ):
+        if value is not None:
+            updates.append(f"{column} = :{column}")
+            params[column] = transform(value) if transform else value
+    if not updates:
+        with get_connection() as conn:
+            return conn.execute(
+                text("SELECT 1 FROM cards WHERE id=:id AND user_id=:uid"), params
+            ).first() is not None
     with get_connection() as conn:
-        row = conn.execute("SELECT id FROM cards WHERE id=?", (card_id,)).fetchone()
-        if row is None:
-            return False
-        updates: list[str] = []
-        params: list = []
-        for column, value in (
-            ("question", question), ("answer", answer), ("tags", tags), ("notes", notes)
-        ):
-            if value is not None:
-                updates.append(f"{column}=?")
-                params.append(value)
-        if updates:
-            params.append(card_id)
-            conn.execute(f"UPDATE cards SET {', '.join(updates)} WHERE id=?", params)
-            conn.commit()
-        return True
-
-
-def delete_card(card_id: int) -> bool:
-    with get_connection() as conn:
-        cursor = conn.execute("DELETE FROM cards WHERE id=?", (card_id,))
-        conn.execute("DELETE FROM review_log WHERE card_id=?", (card_id,))
-        conn.commit()
-        return cursor.rowcount > 0
-
-
-def set_suspended(card_id: int, suspended: bool) -> bool:
-    with get_connection() as conn:
-        cursor = conn.execute(
-            "UPDATE cards SET suspended=? WHERE id=?", (1 if suspended else 0, card_id)
+        result = conn.execute(
+            text(f"UPDATE cards SET {', '.join(updates)} WHERE id=:id AND user_id=:uid"), params
         )
-        conn.commit()
-        return cursor.rowcount > 0
+        return result.rowcount > 0
 
 
-def bury_card(card_id: int) -> bool:
+def delete_card(user_id: int, card_id: int) -> bool:
+    with get_connection() as conn:
+        conn.execute(text("DELETE FROM review_log WHERE card_id=:id AND user_id=:uid"),
+                     {"id": card_id, "uid": user_id})
+        result = conn.execute(text("DELETE FROM cards WHERE id=:id AND user_id=:uid"),
+                               {"id": card_id, "uid": user_id})
+        return result.rowcount > 0
+
+
+def set_suspended(user_id: int, card_id: int, suspended: bool) -> bool:
+    with get_connection() as conn:
+        result = conn.execute(
+            text("UPDATE cards SET suspended=:s WHERE id=:id AND user_id=:uid"),
+            {"s": suspended, "id": card_id, "uid": user_id},
+        )
+        return result.rowcount > 0
+
+
+def bury_card(user_id: int, card_id: int) -> bool:
     """Hide a card until the next IST midnight without touching its schedule."""
     with get_connection() as conn:
-        cursor = conn.execute(
-            "UPDATE cards SET buried_until=? WHERE id=?",
-            (scheduling.next_ist_midnight_utc().isoformat(), card_id),
+        result = conn.execute(
+            text("UPDATE cards SET buried_until=:until WHERE id=:id AND user_id=:uid"),
+            {"until": scheduling.next_ist_midnight_utc(), "id": card_id, "uid": user_id},
         )
-        conn.commit()
-        return cursor.rowcount > 0
+        return result.rowcount > 0
 
 
-def list_suspended(chat_id: int) -> list[dict]:
+def list_suspended(user_id: int) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT * FROM cards WHERE chat_id=? AND suspended=1 ORDER BY id", (chat_id,)
-        ).fetchall()
-        return [dict(row) for row in rows]
+            text("SELECT * FROM cards WHERE user_id=:uid AND suspended=TRUE ORDER BY id"),
+            {"uid": user_id},
+        )
+        return [dict(r._mapping) for r in rows]
 
 
-def list_due_cards(chat_id: int, tag: Optional[str] = None) -> list[dict]:
-    now = datetime.utcnow().isoformat()
+def list_due_cards(user_id: int, tag: Optional[str] = None) -> list[dict]:
+    now = _now()
     with get_connection() as conn:
         if tag:
             rows = conn.execute(
-                f"SELECT * FROM cards WHERE chat_id=? AND due_at<=? AND {_ACTIVE}"
-                " AND ',' || tags || ',' LIKE ? ORDER BY due_at",
-                (chat_id, now, now, f"%,{tag},%"),
-            ).fetchall()
+                text(
+                    f"SELECT * FROM cards WHERE user_id=:uid AND due_at<=:now AND {_ACTIVE}"
+                    " AND string_to_array(tags, ',') @> ARRAY[:tag] ORDER BY due_at"
+                ),
+                {"uid": user_id, "now": now, "tag": tag.strip().lower()},
+            )
         else:
             rows = conn.execute(
-                f"SELECT * FROM cards WHERE chat_id=? AND due_at<=? AND {_ACTIVE} ORDER BY due_at",
-                (chat_id, now, now),
-            ).fetchall()
-        return [dict(row) for row in rows]
+                text(f"SELECT * FROM cards WHERE user_id=:uid AND due_at<=:now AND {_ACTIVE} ORDER BY due_at"),
+                {"uid": user_id, "now": now},
+            )
+        return [dict(r._mapping) for r in rows]
 
 
-def list_all_cards(chat_id: int, tag: Optional[str] = None) -> list[dict]:
-    now = datetime.utcnow().isoformat()
+def list_all_cards(user_id: int, tag: Optional[str] = None) -> list[dict]:
+    now = _now()
     with get_connection() as conn:
         if tag:
             rows = conn.execute(
-                f"SELECT * FROM cards WHERE chat_id=? AND {_ACTIVE}"
-                " AND ',' || tags || ',' LIKE ? ORDER BY due_at",
-                (chat_id, now, f"%,{tag},%"),
-            ).fetchall()
+                text(
+                    f"SELECT * FROM cards WHERE user_id=:uid AND {_ACTIVE}"
+                    " AND string_to_array(tags, ',') @> ARRAY[:tag] ORDER BY due_at"
+                ),
+                {"uid": user_id, "now": now, "tag": tag.strip().lower()},
+            )
         else:
             rows = conn.execute(
-                f"SELECT * FROM cards WHERE chat_id=? AND {_ACTIVE} ORDER BY due_at",
-                (chat_id, now),
-            ).fetchall()
-        return [dict(row) for row in rows]
+                text(f"SELECT * FROM cards WHERE user_id=:uid AND {_ACTIVE} ORDER BY due_at"),
+                {"uid": user_id, "now": now},
+            )
+        return [dict(r._mapping) for r in rows]
 
 
-def list_tags(chat_id: int) -> list[tuple[str, int, int]]:
-    now = datetime.utcnow().isoformat()
+def list_tags(user_id: int) -> list[tuple[str, int, int]]:
+    now = _now()
     with get_connection() as conn:
         rows = conn.execute(
-            f"SELECT tags, due_at FROM cards WHERE chat_id=? AND tags IS NOT NULL AND {_ACTIVE}",
-            (chat_id, now),
-        ).fetchall()
+            text(f"SELECT tags, due_at FROM cards WHERE user_id=:uid AND tags IS NOT NULL AND {_ACTIVE}"),
+            {"uid": user_id, "now": now},
+        )
+        rows = list(rows)
     tag_totals: dict[str, int] = {}
     tag_due: dict[str, int] = {}
     for row in rows:
-        for tag in row["tags"].split(","):
+        for tag in row.tags.split(","):
             tag = tag.strip()
             if not tag:
                 continue
             tag_totals[tag] = tag_totals.get(tag, 0) + 1
-            if row["due_at"] <= now:
+            if row.due_at <= now:
                 tag_due[tag] = tag_due.get(tag, 0) + 1
     return sorted(
         [(tag, total, tag_due.get(tag, 0)) for tag, total in tag_totals.items()],
@@ -179,51 +214,44 @@ def list_tags(chat_id: int) -> list[tuple[str, int, int]]:
     )
 
 
-def get_stats(chat_id: int, tag: Optional[str] = None) -> dict:
-    now = datetime.utcnow().isoformat()
-    tag_filter = " AND ',' || tags || ',' LIKE ?" if tag else ""
-    tag_params: tuple = (f"%,{tag},%",) if tag else ()
+def get_stats(user_id: int, tag: Optional[str] = None) -> dict:
+    now = _now()
+    tag_filter = " AND string_to_array(tags, ',') @> ARRAY[:tag]" if tag else ""
+    params: dict = {"uid": user_id, "now": now}
+    if tag:
+        params["tag"] = tag.strip().lower()
     with get_connection() as conn:
-        total: int = conn.execute(
-            f"SELECT COUNT(*) FROM cards WHERE chat_id=?{tag_filter}",
-            (chat_id,) + tag_params,
-        ).fetchone()[0]
-        due: int = conn.execute(
-            f"SELECT COUNT(*) FROM cards WHERE chat_id=? AND due_at<=? AND {_ACTIVE}{tag_filter}",
-            (chat_id, now, now) + tag_params,
-        ).fetchone()[0]
+        total = conn.execute(
+            text(f"SELECT COUNT(*) FROM cards WHERE user_id=:uid{tag_filter}"), params
+        ).scalar_one()
+        due = conn.execute(
+            text(f"SELECT COUNT(*) FROM cards WHERE user_id=:uid AND due_at<=:now AND {_ACTIVE}{tag_filter}"),
+            params,
+        ).scalar_one()
         rows = conn.execute(
-            f"SELECT stage, COUNT(*) AS count FROM cards WHERE chat_id=?{tag_filter} GROUP BY stage",
-            (chat_id,) + tag_params,
-        ).fetchall()
-        by_stage: dict[int, int] = {row["stage"]: row["count"] for row in rows}
-        suspended: int = conn.execute(
-            f"SELECT COUNT(*) FROM cards WHERE chat_id=? AND suspended=1{tag_filter}",
-            (chat_id,) + tag_params,
-        ).fetchone()[0]
+            text(f"SELECT stage, COUNT(*) AS count FROM cards WHERE user_id=:uid{tag_filter} GROUP BY stage"),
+            params,
+        )
+        by_stage = {r.stage: r.count for r in rows}
+        suspended = conn.execute(
+            text(f"SELECT COUNT(*) FROM cards WHERE user_id=:uid AND suspended=TRUE{tag_filter}"), params
+        ).scalar_one()
     return {"total": total, "due": due, "by_stage": by_stage, "suspended": suspended}
 
 
-def get_forecast(chat_id: int, days: int = 7) -> list[tuple[str, int]]:
-    """Due-card counts per IST day for the next `days` days, plus an overdue bucket.
-
-    Returned as [(label, count), ...] where the first entry is 'Overdue'.
-    """
-    now_utc = datetime.utcnow()
-    now_iso = now_utc.isoformat()
+def get_forecast(user_id: int, days: int = 7) -> list[tuple[str, int]]:
+    """Due-card counts per IST day for the next `days` days, plus an overdue bucket."""
+    now = _now()
     with get_connection() as conn:
-        rows = conn.execute(
-            f"SELECT due_at FROM cards WHERE chat_id=? AND {_ACTIVE}", (chat_id, now_iso)
-        ).fetchall()
+        rows = list(conn.execute(
+            text(f"SELECT due_at FROM cards WHERE user_id=:uid AND {_ACTIVE}"), {"uid": user_id, "now": now}
+        ))
 
-    today_ist = (now_utc + scheduling.IST).date()
+    today_ist = (now + scheduling.IST).date()
     buckets: dict[str, int] = {}
     overdue = 0
     for row in rows:
-        try:
-            due_ist = (datetime.fromisoformat(row["due_at"]) + scheduling.IST).date()
-        except (ValueError, TypeError):
-            continue
+        due_ist = (row.due_at + scheduling.IST).date()
         delta = (due_ist - today_ist).days
         if delta < 0:
             overdue += 1
@@ -238,42 +266,40 @@ def get_forecast(chat_id: int, days: int = 7) -> list[tuple[str, int]]:
     return result
 
 
-def search_cards(chat_id: int, keyword: str) -> list[dict]:
+def search_cards(user_id: int, keyword: str) -> list[dict]:
     pattern = f"%{keyword}%"
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT * FROM cards WHERE chat_id=? AND (question LIKE ? OR answer LIKE ?)",
-            (chat_id, pattern, pattern),
-        ).fetchall()
-        return [dict(row) for row in rows]
+            text("SELECT * FROM cards WHERE user_id=:uid AND (question ILIKE :p OR answer ILIKE :p)"),
+            {"uid": user_id, "p": pattern},
+        )
+        return [dict(r._mapping) for r in rows]
 
 
 def record_answer(
-    card_id: int, quality: int, desired_retention: float = fsrs.DEFAULT_RETENTION,
+    user_id: int, card_id: int, quality: int, desired_retention: float = fsrs.DEFAULT_RETENTION,
     study_window: Optional[str] = None, exam_date: Optional[str] = None,
-) -> None:
+) -> Optional[dict]:
     """Advance a card through FSRS and write back its new memory state and due date."""
-    now = datetime.utcnow()
+    now = _now()
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT stability, difficulty, last_review, repetitions, consecutive_again"
-            " FROM cards WHERE id=?",
-            (card_id,),
-        ).fetchone()
+            text(
+                "SELECT stability, difficulty, last_review, repetitions, consecutive_again"
+                " FROM cards WHERE id=:id AND user_id=:uid"
+            ),
+            {"id": card_id, "uid": user_id},
+        ).mappings().first()
         if row is None:
-            return
+            return None
 
         if row["last_review"]:
-            try:
-                elapsed = (now - datetime.fromisoformat(row["last_review"])).total_seconds() / 86400
-            except (ValueError, TypeError):
-                elapsed = 0.0
+            elapsed = max(0.0, (now - row["last_review"]).total_seconds() / 86400)
         else:
             elapsed = 0.0
 
         stability, difficulty, interval = fsrs.schedule(
-            row["stability"], row["difficulty"], max(0.0, elapsed), quality,
-            desired_retention=desired_retention,
+            row["stability"], row["difficulty"], elapsed, quality, desired_retention=desired_retention,
         )
         interval = scheduling.clamp_interval_for_exam(interval, exam_date, now)
 
@@ -284,44 +310,58 @@ def record_answer(
         consecutive_again = (row["consecutive_again"] or 0) + 1 if quality == 1 else 0
 
         conn.execute(
-            "UPDATE cards SET stability=?, difficulty=?, last_review=?, due_at=?,"
-            " interval_days=?, repetitions=?, stage=?, consecutive_again=?, buried_until=NULL"
-            " WHERE id=?",
-            (stability, difficulty, now.isoformat(), due_at.isoformat(), interval,
-             repetitions, repetitions, consecutive_again, card_id),
+            text(
+                "UPDATE cards SET stability=:s, difficulty=:d, last_review=:lr, due_at=:due,"
+                " interval_days=:iv, repetitions=:rep, stage=:stage, consecutive_again=:ca,"
+                " buried_until=NULL WHERE id=:id AND user_id=:uid"
+            ),
+            {
+                "s": stability, "d": difficulty, "lr": now, "due": due_at, "iv": interval,
+                "rep": repetitions, "stage": repetitions, "ca": consecutive_again,
+                "id": card_id, "uid": user_id,
+            },
         )
-        conn.commit()
+        return _row(conn.execute(
+            text("SELECT * FROM cards WHERE id=:id AND user_id=:uid"), {"id": card_id, "uid": user_id}
+        ).first())
 
 
-def snooze_card(card_id: int, delta: timedelta) -> None:
-    new_due = (datetime.utcnow() + delta).isoformat()
+def snooze_card(user_id: int, card_id: int, delta: timedelta) -> bool:
     with get_connection() as conn:
-        conn.execute("UPDATE cards SET due_at=? WHERE id=?", (new_due, card_id))
-        conn.commit()
+        result = conn.execute(
+            text("UPDATE cards SET due_at=:due WHERE id=:id AND user_id=:uid"),
+            {"due": _now() + delta, "id": card_id, "uid": user_id},
+        )
+        return result.rowcount > 0
 
 
-def get_card(card_id: int) -> Optional[dict]:
+def get_card(user_id: int, card_id: int) -> Optional[dict]:
     with get_connection() as conn:
-        row = conn.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
-        return dict(row) if row else None
+        return _row(conn.execute(
+            text("SELECT * FROM cards WHERE id=:id AND user_id=:uid"), {"id": card_id, "uid": user_id}
+        ).first())
 
 
-def list_leeches(chat_id: int) -> list[dict]:
+def list_leeches(user_id: int) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT * FROM cards WHERE chat_id=? AND consecutive_again>=?"
-            " ORDER BY consecutive_again DESC",
-            (chat_id, LEECH_THRESHOLD),
-        ).fetchall()
-        return [dict(row) for row in rows]
+            text(
+                "SELECT * FROM cards WHERE user_id=:uid AND consecutive_again>=:t"
+                " ORDER BY consecutive_again DESC"
+            ),
+            {"uid": user_id, "t": LEECH_THRESHOLD},
+        )
+        return [dict(r._mapping) for r in rows]
 
 
-def list_weak_cards(chat_id: int, limit: int = 10) -> list[dict]:
+def list_weak_cards(user_id: int, limit: int = 10) -> list[dict]:
     """Leeches, or cards FSRS rates as intrinsically hard — worth re-teaching."""
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT * FROM cards WHERE chat_id=? AND (consecutive_again>=? OR difficulty>=7.5)"
-            " ORDER BY consecutive_again DESC, difficulty DESC LIMIT ?",
-            (chat_id, LEECH_THRESHOLD, limit),
-        ).fetchall()
-        return [dict(row) for row in rows]
+            text(
+                "SELECT * FROM cards WHERE user_id=:uid AND (consecutive_again>=:t OR difficulty>=7.5)"
+                " ORDER BY consecutive_again DESC, difficulty DESC LIMIT :lim"
+            ),
+            {"uid": user_id, "t": LEECH_THRESHOLD, "lim": limit},
+        )
+        return [dict(r._mapping) for r in rows]
