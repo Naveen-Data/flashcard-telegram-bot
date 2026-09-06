@@ -1,2 +1,7 @@
 python-telegram-bot[job-queue]>=20.0
 mcp==2.0.0
+SQLAlchemy>=2.0,<3
+alembic>=1.13,<2
+psycopg[binary,pool]>=3.1,<4
+argon2-cffi>=23.1,<24
+pytest>=8,<9

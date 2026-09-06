@@ -22,7 +22,7 @@ def _pop_from_queue(context: ContextTypes.DEFAULT_TYPE, card_id: int) -> None:
         pass
 
 
-async def send_next_card(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+async def send_next_card(context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int) -> None:
     queue: list[int] = context.chat_data.get("review_queue", [])
     if not queue:
         session = context.chat_data.pop("session", None)
@@ -40,10 +40,10 @@ async def send_next_card(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> No
             await context.bot.send_message(chat_id=chat_id, text="🎉 All done! Great work.")
         return
     card_id = queue[0]
-    card = db.get_card(card_id)
+    card = db.get_card(user_id, card_id)
     if card is None:
         context.chat_data["review_queue"] = queue[1:]
-        await send_next_card(context, chat_id)
+        await send_next_card(context, user_id, chat_id)
         return
     session = context.chat_data.get("session", {})
     reviewed = session.get("reviewed", 0)
@@ -72,6 +72,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
     data: str = query.data
     chat_id = query.message.chat_id
+    user_id = db.get_user_id_for_telegram(update.effective_user.id, chat_id)
     is_photo = bool(query.message.photo)
 
     async def edit(text: str, reply_markup=None):
@@ -80,10 +81,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             await query.edit_message_text(text, reply_markup=reply_markup)
 
+    if user_id is None:
+        await edit("Send /start first.")
+        return
+
     try:
         if data.startswith("reveal:"):
             card_id = int(data.split(":")[1])
-            card = db.get_card(card_id)
+            card = db.get_card(user_id, card_id)
             if card is None:
                 await edit("Card not found.")
                 return
@@ -104,20 +109,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             quality = int(quality_str)
             card_id = int(card_id_str)
 
-            card = apply_review(chat_id, card_id, quality)
+            card = apply_review(user_id, card_id, quality)
             if card is None:
                 await edit("Card not found.")
                 return
 
             labels = {1: "🔴 Again", 3: "🟠 Hard", 4: "🟢 Good", 5: "🔵 Easy"}
-            if card:
-                next_date = card["due_at"][:10]
-                interval = card["interval_days"]
-                detail = f"next review: {next_date} ({interval}d)"
-            else:
-                detail = "next review: N/A"
+            next_date = card["due_at"].strftime("%Y-%m-%d")
+            interval = card["interval_days"]
+            detail = f"next review: {next_date} ({interval}d)"
             leech_note = ""
-            if card and card.get("consecutive_again", 0) == LEECH_THRESHOLD:
+            if card.get("consecutive_again", 0) == LEECH_THRESHOLD:
                 leech_note = f"\n⚠️ Leech — {LEECH_THRESHOLD} wrong in a row. /leeches to manage."
             await edit(f"{labels.get(quality, '✅')} — {detail}{leech_note}")
 
@@ -133,31 +135,31 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     context.chat_data["review_queue"] = queue + [card_id]
                     session["total"] = session.get("total", 0) + 1
                     context.chat_data["session"] = session
-            await send_next_card(context, chat_id)
+            await send_next_card(context, user_id, chat_id)
 
         elif data.startswith("snooze:"):
             parts = data.split(":")
             snooze_type = parts[1]
             card_id = int(parts[2])
-            db.snooze_card(card_id, utils.snooze_delta(snooze_type))
+            db.snooze_card(user_id, card_id, utils.snooze_delta(snooze_type))
             label_map = {"1h": "1 hour", "tonight": "tonight", "tomorrow": "tomorrow"}
             await edit(f"⏰ Snoozed until {label_map.get(snooze_type, snooze_type)}")
             _pop_from_queue(context, card_id)
-            await send_next_card(context, chat_id)
+            await send_next_card(context, user_id, chat_id)
 
         elif data.startswith("bury:"):
             card_id = int(data.split(":")[1])
-            db.bury_card(card_id)
+            db.bury_card(user_id, card_id)
             await edit(f"🫥 Card #{card_id} buried until tomorrow (schedule untouched).")
             _pop_from_queue(context, card_id)
-            await send_next_card(context, chat_id)
+            await send_next_card(context, user_id, chat_id)
 
         elif data.startswith("suspend:"):
             card_id = int(data.split(":")[1])
-            db.set_suspended(card_id, True)
+            db.set_suspended(user_id, card_id, True)
             await edit(f"⏸ Card #{card_id} suspended. /unsuspend {card_id} to bring it back.")
             _pop_from_queue(context, card_id)
-            await send_next_card(context, chat_id)
+            await send_next_card(context, user_id, chat_id)
 
         else:
             logger.warning("Unknown callback data: %s", data)

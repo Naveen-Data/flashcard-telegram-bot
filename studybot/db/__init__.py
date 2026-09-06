@@ -1,4 +1,4 @@
-from studybot.db.connection import DB_PATH, init_db
+from studybot.db.connection import init_db
 from studybot.db.cards import (
     add_card,
     add_card_with_reverse,
@@ -27,7 +27,6 @@ from studybot.db.settings import (
     get_dnd_window,
     get_exam_date_for_card,
     get_global_setting,
-    get_registered_chat_id,
     get_setting,
     get_streak_info,
     get_study_window,
@@ -39,12 +38,26 @@ from studybot.db.settings import (
     set_dnd_window,
     set_exam,
     set_global_setting,
-    set_registered_chat_id,
     set_setting,
     set_study_window,
     update_streak,
 )
-from studybot.db.auth import account_exists, login, logout, register, verify_session
+from studybot.db.auth import (
+    authenticate_api_token,
+    authenticate_session,
+    change_password,
+    create_api_token,
+    list_api_tokens,
+    login,
+    logout,
+    register_user,
+    revoke_api_token,
+)
+from studybot.db.users import (
+    get_or_create_telegram_user,
+    get_user_id_for_telegram,
+    list_notification_targets,
+)
 from studybot.db.notes import add_session_note, list_session_notes
 from studybot.db.reviews import (
     apply_undo,
@@ -61,14 +74,21 @@ from studybot.db.reviews import (
 )
 
 __all__ = [
-    "DB_PATH",
     "init_db",
     # auth
-    "account_exists",
+    "authenticate_api_token",
+    "authenticate_session",
+    "change_password",
+    "create_api_token",
+    "list_api_tokens",
     "login",
     "logout",
-    "register",
-    "verify_session",
+    "register_user",
+    "revoke_api_token",
+    # telegram identity
+    "get_or_create_telegram_user",
+    "get_user_id_for_telegram",
+    "list_notification_targets",
     # cards
     "add_card",
     "add_card_with_reverse",
@@ -99,7 +119,6 @@ __all__ = [
     "get_dnd_window",
     "get_exam_date_for_card",
     "get_global_setting",
-    "get_registered_chat_id",
     "get_setting",
     "get_streak_info",
     "get_study_window",
@@ -111,7 +130,6 @@ __all__ = [
     "set_dnd_window",
     "set_exam",
     "set_global_setting",
-    "set_registered_chat_id",
     "set_setting",
     "set_study_window",
     "update_streak",

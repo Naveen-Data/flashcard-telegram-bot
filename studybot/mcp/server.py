@@ -1,12 +1,10 @@
-import asyncio
-import hmac
 import logging
 import os
 import time
 from collections import defaultdict, deque
 from typing import Optional
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 
@@ -22,12 +20,25 @@ db.init_db()
 
 mcp_server = MCPServer("study-bot")
 
-_NO_CHAT = {"error": "No registered chat. Send /start to the bot first."}
+_UNAUTHORIZED = {
+    "error": "Invalid or missing API token. Generate one in the web app "
+             "(Settings -> MCP tokens) and connect with Authorization: Bearer <token>."
+}
+
+
+def _authed_user(ctx: Context) -> Optional[int]:
+    """The caller's user_id, resolved by _RequireAuth and stashed on the request
+    before MCP protocol dispatch — never re-derived from anything the client sends
+    inside the tool call itself.
+    """
+    request = ctx.request_context.request
+    return getattr(getattr(request, "state", None), "study_user_id", None)
 
 
 @mcp_server.tool()
 def add_card(
-    question: str, answer: str, tags: str = "", notes: str = "", reverse: bool = False
+    question: str, answer: str, tags: str = "", notes: str = "", reverse: bool = False,
+    ctx: Context = None,
 ) -> dict:
     """Add a single flashcard.
 
@@ -40,22 +51,22 @@ def add_card(
         reverse: If True, also create the mirror card (answer -> question), scheduled
             independently. Useful for term/definition pairs, wrong for one-way facts.
     """
-    chat_id = db.get_registered_chat_id()
-    if chat_id is None:
-        return _NO_CHAT
+    user_id = _authed_user(ctx)
+    if user_id is None:
+        return _UNAUTHORIZED
     tags_val = tags.strip() or None
     notes_val = notes.strip() or None
     if reverse:
         forward_id, reverse_id = db.add_card_with_reverse(
-            question, answer, chat_id, tags=tags_val, notes=notes_val
+            question, answer, user_id, tags=tags_val, notes=notes_val
         )
         return {"ids": [forward_id, reverse_id], "count": 2, "reverse": True}
-    card_id = db.add_card(question, answer, chat_id, tags=tags_val, notes=notes_val)
+    card_id = db.add_card(question, answer, user_id, tags=tags_val, notes=notes_val)
     return {"id": card_id, "question": question, "answer": answer, "tags": tags_val}
 
 
 @mcp_server.tool()
-def add_cards_bulk(cards: list[dict]) -> dict:
+def add_cards_bulk(cards: list[dict], ctx: Context = None) -> dict:
     """Add multiple flashcards in one call.
 
     Args:
@@ -67,144 +78,138 @@ def add_cards_bulk(cards: list[dict]) -> dict:
     Returns:
         Dict with ids (list of ints) and count of cards added.
     """
-    chat_id = db.get_registered_chat_id()
-    if chat_id is None:
-        return _NO_CHAT
-    ids = db.add_cards_bulk(cards, chat_id)
+    user_id = _authed_user(ctx)
+    if user_id is None:
+        return _UNAUTHORIZED
+    ids = db.add_cards_bulk(cards, user_id)
     return {"ids": ids, "count": len(ids)}
 
 
 @mcp_server.tool()
 def edit_card(
     card_id: int, question: Optional[str] = None, answer: Optional[str] = None,
-    tags: Optional[str] = None, notes: Optional[str] = None,
+    tags: Optional[str] = None, notes: Optional[str] = None, ctx: Context = None,
 ) -> dict:
     """Update an existing card in place. Only the fields you pass are changed.
 
     Scheduling state is untouched, so fixing a typo or tightening the wording of a
     card the user keeps failing does not reset its review history.
     """
-    chat_id = db.get_registered_chat_id()
-    if chat_id is None:
-        return _NO_CHAT
-    card = db.get_card(card_id)
-    if card is None or card["chat_id"] != chat_id:
+    user_id = _authed_user(ctx)
+    if user_id is None:
+        return _UNAUTHORIZED
+    if not db.edit_card(user_id, card_id, question=question, answer=answer, tags=tags, notes=notes):
         return {"error": f"Card #{card_id} not found."}
-    db.edit_card(card_id, question=question, answer=answer, tags=tags, notes=notes)
-    return {"id": card_id, "updated": True, "card": db.get_card(card_id)}
+    return {"id": card_id, "updated": True, "card": db.get_card(user_id, card_id)}
 
 
 @mcp_server.tool()
-def delete_card(card_id: int) -> dict:
+def delete_card(card_id: int, ctx: Context = None) -> dict:
     """Permanently delete a card and its review history. Prefer suspend_card if the
     user might want it back — deletion cannot be undone."""
-    chat_id = db.get_registered_chat_id()
-    if chat_id is None:
-        return _NO_CHAT
-    card = db.get_card(card_id)
-    if card is None or card["chat_id"] != chat_id:
+    user_id = _authed_user(ctx)
+    if user_id is None:
+        return _UNAUTHORIZED
+    if not db.delete_card(user_id, card_id):
         return {"error": f"Card #{card_id} not found."}
-    db.delete_card(card_id)
     return {"id": card_id, "deleted": True}
 
 
 @mcp_server.tool()
-def suspend_card(card_id: int, suspended: bool = True) -> dict:
+def suspend_card(card_id: int, suspended: bool = True, ctx: Context = None) -> dict:
     """Take a card out of review rotation (or put it back with suspended=False).
 
     Reversible and history-preserving — the right move for a leech the user wants
     to park rather than lose.
     """
-    chat_id = db.get_registered_chat_id()
-    if chat_id is None:
-        return _NO_CHAT
-    card = db.get_card(card_id)
-    if card is None or card["chat_id"] != chat_id:
+    user_id = _authed_user(ctx)
+    if user_id is None:
+        return _UNAUTHORIZED
+    if not db.set_suspended(user_id, card_id, suspended):
         return {"error": f"Card #{card_id} not found."}
-    db.set_suspended(card_id, suspended)
     return {"id": card_id, "suspended": suspended}
 
 
 @mcp_server.tool()
-def search_cards(keyword: str) -> list[dict]:
+def search_cards(keyword: str, ctx: Context = None) -> list[dict]:
     """Find cards whose question or answer contains `keyword`.
 
     Use before adding cards to avoid creating a near-duplicate of something the
     user already has.
     """
-    chat_id = db.get_registered_chat_id()
-    if chat_id is None:
+    user_id = _authed_user(ctx)
+    if user_id is None:
         return []
-    return db.search_cards(chat_id, keyword)
+    return db.search_cards(user_id, keyword)
 
 
 @mcp_server.tool()
-def list_due_cards() -> list[dict]:
+def list_due_cards(ctx: Context = None) -> list[dict]:
     """Return all cards currently due for review, excluding suspended and buried ones."""
-    chat_id = db.get_registered_chat_id()
-    if chat_id is None:
+    user_id = _authed_user(ctx)
+    if user_id is None:
         return []
-    return db.list_due_cards(chat_id)
+    return db.list_due_cards(user_id)
 
 
 @mcp_server.tool()
-def get_card_history(card_id: int) -> dict:
+def get_card_history(card_id: int, ctx: Context = None) -> dict:
     """Full detail for one card plus its recent review log.
 
     Reveals FSRS memory state: stability (days until recall drops to the target
     retention) and difficulty (1-10). Low stability after many reviews means the
     card itself is probably badly written.
     """
-    chat_id = db.get_registered_chat_id()
-    if chat_id is None:
-        return _NO_CHAT
-    card = db.get_card(card_id)
-    if card is None or card["chat_id"] != chat_id:
+    user_id = _authed_user(ctx)
+    if user_id is None:
+        return _UNAUTHORIZED
+    card = db.get_card(user_id, card_id)
+    if card is None:
         return {"error": f"Card #{card_id} not found."}
-    return {"card": card, "history": db.get_card_history(card_id, limit=20)}
+    return {"card": card, "history": db.get_card_history(user_id, card_id, limit=20)}
 
 
 @mcp_server.tool()
-def get_stats() -> dict:
+def get_stats(ctx: Context = None) -> dict:
     """Deck totals: total cards, how many are due, suspended count, stage breakdown."""
-    chat_id = db.get_registered_chat_id()
-    if chat_id is None:
-        return _NO_CHAT
-    return db.get_stats(chat_id)
+    user_id = _authed_user(ctx)
+    if user_id is None:
+        return _UNAUTHORIZED
+    return db.get_stats(user_id)
 
 
 @mcp_server.tool()
-def get_retention_stats(days: int = 30) -> dict:
+def get_retention_stats(days: int = 30, ctx: Context = None) -> dict:
     """True retention over the last `days`: how often the user recalled a card they
     had already learned (each card's first review is excluded).
 
     Includes a per-tag breakdown sorted weakest-first — the fastest way to see which
     topic actually needs re-teaching rather than more drilling.
     """
-    chat_id = db.get_registered_chat_id()
-    if chat_id is None:
-        return _NO_CHAT
-    return db.get_retention_stats(chat_id, days=days)
+    user_id = _authed_user(ctx)
+    if user_id is None:
+        return _UNAUTHORIZED
+    return db.get_retention_stats(user_id, days=days)
 
 
 @mcp_server.tool()
-def get_forecast(days: int = 7) -> dict:
+def get_forecast(days: int = 7, ctx: Context = None) -> dict:
     """Upcoming review load per day, so a study session can be planned around it.
 
     Returns an 'Overdue' bucket followed by one entry per upcoming day.
     """
-    chat_id = db.get_registered_chat_id()
-    if chat_id is None:
-        return _NO_CHAT
-    forecast = db.get_forecast(chat_id, days=days)
+    user_id = _authed_user(ctx)
+    if user_id is None:
+        return _UNAUTHORIZED
+    forecast = db.get_forecast(user_id, days=days)
     return {
         "forecast": [{"day": label, "due": count} for label, count in forecast],
-        "daily_cap": db.get_daily_cap(chat_id),
+        "daily_cap": db.get_daily_cap(user_id),
     }
 
 
 @mcp_server.tool()
-def get_weak_cards() -> list[dict]:
+def get_weak_cards(ctx: Context = None) -> list[dict]:
     """Cards the user is struggling with — leeches (4+ wrong in a row) or ones FSRS
     rates as intrinsically hard.
 
@@ -212,14 +217,14 @@ def get_weak_cards() -> list[dict]:
     underlying concept again, then either rewrite the card with edit_card (if the
     card is the problem) or let the user re-attempt it in the bot.
     """
-    chat_id = db.get_registered_chat_id()
-    if chat_id is None:
+    user_id = _authed_user(ctx)
+    if user_id is None:
         return []
-    return db.list_weak_cards(chat_id)
+    return db.list_weak_cards(user_id)
 
 
 @mcp_server.tool()
-def add_session_note(topic: str, content: str, tags: str = "") -> dict:
+def add_session_note(topic: str, content: str, tags: str = "", ctx: Context = None) -> dict:
     """Save a note from a study session (a summary, what was covered, traps to watch for).
 
     Separate from a card's own `notes` field — this is session-level, not tied to
@@ -231,20 +236,20 @@ def add_session_note(topic: str, content: str, tags: str = "") -> dict:
         content: The note body — summary, key ideas, traps. Markdown/plain text fine.
         tags: Optional comma-separated, e.g. 'rag,advanced'.
     """
-    chat_id = db.get_registered_chat_id()
-    if chat_id is None:
-        return _NO_CHAT
-    note_id = db.add_session_note(chat_id, topic, content, tags=tags.strip() or None)
+    user_id = _authed_user(ctx)
+    if user_id is None:
+        return _UNAUTHORIZED
+    note_id = db.add_session_note(user_id, topic, content, tags=tags.strip() or None)
     return {"id": note_id, "topic": topic}
 
 
 @mcp_server.tool()
-def list_session_notes(limit: int = 20) -> list[dict]:
+def list_session_notes(limit: int = 20, ctx: Context = None) -> list[dict]:
     """Return the most recent study-session notes, newest first."""
-    chat_id = db.get_registered_chat_id()
-    if chat_id is None:
+    user_id = _authed_user(ctx)
+    if user_id is None:
         return []
-    return db.list_session_notes(chat_id, limit=limit)
+    return db.list_session_notes(user_id, limit=limit)
 
 
 from studybot.web import register as _register_web  # noqa: E402
@@ -260,26 +265,26 @@ _DEV_ORIGINS = [
     "http://localhost:5183", "http://127.0.0.1:5183",
 ]
 
-# /app (the SPA shell) and /api/auth/* (register, login, status) stay reachable
-# without any credential — the shell has to load and let someone log in before
-# anything else is possible. CORS preflight OPTIONS is never gated either way.
-_PUBLIC_PREFIXES = ("/api/auth/",)
+# register/login/logout stay reachable without a credential — someone has to be
+# able to log in before anything else is possible. Everything else under
+# /api/auth/ (e.g. change-password) requires an authenticated session like any
+# other /api/ route. CORS preflight OPTIONS is never gated either way.
+_PUBLIC_PREFIXES = ("/api/auth/register", "/api/auth/login", "/api/auth/logout")
 
 
 class _RequireAuth:
-    """Two different auth models behind one gate, because the two clients are
-    different shapes: Claude Code (/mcp) sends one static secret it was configured
-    with once; a browser (/api/*) logs a human in and gets a session token back.
+    """Resolves the caller to a user_id before anything else runs, and stashes it on
+    the ASGI scope's `state` so route handlers and MCP tools read it from there
+    rather than re-parsing (and re-trusting) anything the client sends per call.
 
-    /mcp: no-op if MCP_AUTH_TOKEN is unset, so deploying this before the secret
-    exists doesn't take the server down.
-    /api/*: always enforced via studybot.db.verify_session — registration always
-    works regardless of any env var.
+    /mcp: personal API tokens created in the web app (studybot.db.authenticate_api_token).
+    /api/*: browser session tokens from login (studybot.db.authenticate_session).
+    There is no more static shared secret for either surface — every caller is a
+    specific, identified, revocable principal.
     """
 
-    def __init__(self, app, mcp_token: str | None):
+    def __init__(self, app):
         self.app = app
-        self.mcp_token = mcp_token
 
     async def __call__(self, scope, receive, send):
         path = scope.get("path", "")
@@ -296,14 +301,16 @@ class _RequireAuth:
         auth = headers.get(b"authorization", b"").decode()
         token = auth[7:] if auth.startswith("Bearer ") else ""
 
-        if path.startswith("/mcp"):
-            ok = not self.mcp_token or hmac.compare_digest(token, self.mcp_token)
-        else:
-            ok = db.verify_session(token)
+        user_id = (
+            db.authenticate_api_token(token) if path.startswith("/mcp")
+            else db.authenticate_session(token)
+        ) if token else None
 
-        if not ok:
+        if user_id is None:
             await JSONResponse({"error": "Unauthorized"}, status_code=401)(scope, receive, send)
             return
+        scope.setdefault("state", {})
+        scope["state"]["study_user_id"] = user_id
         await self.app(scope, receive, send)
 
 
@@ -373,13 +380,13 @@ class _RateLimit:
 
 def build_app(host: str = "127.0.0.1"):
     app = mcp_server.streamable_http_app(streamable_http_path="/mcp", host=host)
-    app = _RequireAuth(app, os.environ.get("MCP_AUTH_TOKEN"))
+    app = _RequireAuth(app)
     app = _RateLimit(app)
     extra_origins = [o.strip() for o in os.environ.get("WEB_ALLOWED_ORIGINS", "").split(",") if o.strip()]
     return CORSMiddleware(
         app,
         allow_origins=_DEV_ORIGINS + extra_origins,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Content-Type", "Authorization"],
     )
 

@@ -14,18 +14,24 @@ jobs:
           host: ${{ secrets.ORACLE_HOST }}
           username: ${{ secrets.ORACLE_USER }}
           key: ${{ secrets.ORACLE_SSH_KEY }}
-          envs: TELEGRAM_BOT_TOKEN,MCP_HOST,WEB_ALLOWED_ORIGINS,MCP_AUTH_TOKEN
+          envs: TELEGRAM_BOT_TOKEN,MCP_HOST,WEB_ALLOWED_ORIGINS,PGHOST,PGPORT,PGUSER,PGPASSWORD,PGDATABASE,PGSSLMODE
           script: |
             cd ~/flashcard-telegram-bot
             git pull origin main
-            printf "TELEGRAM_BOT_TOKEN=%s\nMCP_HOST=%s\nWEB_ALLOWED_ORIGINS=%s\nMCP_AUTH_TOKEN=%s\n" "$TELEGRAM_BOT_TOKEN" "$MCP_HOST" "$WEB_ALLOWED_ORIGINS" "$MCP_AUTH_TOKEN" > .env
+            printf "TELEGRAM_BOT_TOKEN=%s\nMCP_HOST=%s\nWEB_ALLOWED_ORIGINS=%s\nPGHOST=%s\nPGPORT=%s\nPGUSER=%s\nPGPASSWORD=%s\nPGDATABASE=%s\nPGSSLMODE=%s\n" "$TELEGRAM_BOT_TOKEN" "$MCP_HOST" "$WEB_ALLOWED_ORIGINS" "$PGHOST" "$PGPORT" "$PGUSER" "$PGPASSWORD" "$PGDATABASE" "$PGSSLMODE" > .env
             chmod 600 .env
             source venv/bin/activate
             pip install -r requirements.txt --quiet
+            alembic upgrade head
             sudo systemctl restart studybot studybot-mcp
             echo "Deployed at $(date)"
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           MCP_HOST: ${{ secrets.MCP_HOST }}
           WEB_ALLOWED_ORIGINS: ${{ secrets.WEB_ALLOWED_ORIGINS }}
-          MCP_AUTH_TOKEN: ${{ secrets.MCP_AUTH_TOKEN }}
+          PGHOST: ${{ secrets.PGHOST }}
+          PGPORT: ${{ secrets.PGPORT }}
+          PGUSER: ${{ secrets.PGUSER }}
+          PGPASSWORD: ${{ secrets.PGPASSWORD }}
+          PGDATABASE: ${{ secrets.PGDATABASE }}
+          PGSSLMODE: ${{ secrets.PGSSLMODE }}
