@@ -156,6 +156,13 @@ check("CORS header present for allowed dev origin", r.headers.get("access-contro
 r = anon.get("/api/due", headers={"Origin": "https://evil.example.com"})
 check("CORS does not reflect arbitrary origins", "access-control-allow-origin" not in r.headers)
 
+# every method an actual browser will preflight for must be allowed, or the
+# real request never leaves the browser (TestClient itself doesn't enforce
+# preflight, so this has to be checked explicitly, not just exercised)
+r = anon.options("/api/tokens/1", headers={"Origin": "http://localhost:5173",
+                                            "Access-Control-Request-Method": "DELETE"})
+check("CORS preflight allows DELETE (token revoke)", r.status_code < 400, r.text[:200])
+
 # --- /mcp: real per-user bearer tokens, no static shared secret --------------
 
 MCP_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}

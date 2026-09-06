@@ -386,7 +386,7 @@ def build_app(host: str = "127.0.0.1"):
     return CORSMiddleware(
         app,
         allow_origins=_DEV_ORIGINS + extra_origins,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Content-Type", "Authorization"],
     )
 
