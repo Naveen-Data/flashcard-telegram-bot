@@ -1,10 +1,14 @@
 import asyncio
+import hmac
 import logging
 import os
+import time
+from collections import defaultdict, deque
 from typing import Optional
 
 from mcp.server.mcpserver import MCPServer
 from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse
 
 from studybot import db
 
@@ -256,15 +260,127 @@ _DEV_ORIGINS = [
     "http://localhost:5183", "http://127.0.0.1:5183",
 ]
 
+# /app (the SPA shell) and /api/auth/* (register, login, status) stay reachable
+# without any credential — the shell has to load and let someone log in before
+# anything else is possible. CORS preflight OPTIONS is never gated either way.
+_PUBLIC_PREFIXES = ("/api/auth/",)
+
+
+class _RequireAuth:
+    """Two different auth models behind one gate, because the two clients are
+    different shapes: Claude Code (/mcp) sends one static secret it was configured
+    with once; a browser (/api/*) logs a human in and gets a session token back.
+
+    /mcp: no-op if MCP_AUTH_TOKEN is unset, so deploying this before the secret
+    exists doesn't take the server down.
+    /api/*: always enforced via studybot.db.verify_session — registration always
+    works regardless of any env var.
+    """
+
+    def __init__(self, app, mcp_token: str | None):
+        self.app = app
+        self.mcp_token = mcp_token
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get("path", "")
+        if (
+            scope["type"] != "http"
+            or scope["method"] == "OPTIONS"
+            or path.startswith(_PUBLIC_PREFIXES)
+            or not (path.startswith("/api/") or path.startswith("/mcp"))
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        auth = headers.get(b"authorization", b"").decode()
+        token = auth[7:] if auth.startswith("Bearer ") else ""
+
+        if path.startswith("/mcp"):
+            ok = not self.mcp_token or hmac.compare_digest(token, self.mcp_token)
+        else:
+            ok = db.verify_session(token)
+
+        if not ok:
+            await JSONResponse({"error": "Unauthorized"}, status_code=401)(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+# (path_prefix, method_or_None, max_requests, window_seconds) — first match wins,
+# an unmatched path (e.g. /app) is never limited. Login/register get the tight
+# limits since they're the actual brute-force/spam targets; /mcp and general
+# /api/* just need a ceiling against a runaway client or script.
+_RATE_LIMIT_RULES: list[tuple[str, Optional[str], int, float]] = [
+    ("/api/auth/login", "POST", 5, 300),
+    ("/api/auth/register", "POST", 3, 900),
+    ("/mcp", None, 120, 60),
+    ("/api/", None, 60, 60),
+]
+
+
+class _RateLimit:
+    """Fixed-window rate limit per client IP, in memory.
+
+    Fine for a single uvicorn process (this deployment); would need a shared
+    store (e.g. Redis) if this ever ran behind multiple workers. Reads the
+    real client from X-Forwarded-For when present — nginx must set that header
+    for limits to be per-visitor rather than one shared bucket for everyone
+    behind the proxy (`proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`).
+    """
+
+    def __init__(self, app, rules=_RATE_LIMIT_RULES):
+        self.app = app
+        self.rules = rules
+        self.hits: dict[tuple[str, int], deque] = defaultdict(deque)
+
+    @staticmethod
+    def _client_ip(scope) -> str:
+        headers = dict(scope.get("headers", []))
+        forwarded = headers.get(b"x-forwarded-for")
+        if forwarded:
+            return forwarded.decode().split(",")[0].strip()
+        client = scope.get("client")
+        return client[0] if client else "unknown"
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] == "OPTIONS":
+            await self.app(scope, receive, send)
+            return
+
+        path, method = scope["path"], scope["method"]
+        for i, (prefix, rule_method, limit, window) in enumerate(self.rules):
+            if not path.startswith(prefix) or (rule_method and rule_method != method):
+                continue
+            key = (self._client_ip(scope), i)
+            hits = self.hits[key]
+            now = time.monotonic()
+            while hits and now - hits[0] > window:
+                hits.popleft()
+            if len(hits) >= limit:
+                retry_after = max(1, round(window - (now - hits[0])))
+                await JSONResponse(
+                    {"error": "Too many requests"},
+                    status_code=429,
+                    headers={"Retry-After": str(retry_after)},
+                )(scope, receive, send)
+                return
+            hits.append(now)
+            break
+
+        await self.app(scope, receive, send)
+
 
 def build_app(host: str = "127.0.0.1"):
     app = mcp_server.streamable_http_app(streamable_http_path="/mcp", host=host)
+    app = _RequireAuth(app, os.environ.get("MCP_AUTH_TOKEN"))
+    app = _RateLimit(app)
     extra_origins = [o.strip() for o in os.environ.get("WEB_ALLOWED_ORIGINS", "").split(",") if o.strip()]
     return CORSMiddleware(
         app,
         allow_origins=_DEV_ORIGINS + extra_origins,
         allow_methods=["GET", "POST"],
-        allow_headers=["Content-Type"],
+        allow_headers=["Content-Type", "Authorization"],
     )
 
 

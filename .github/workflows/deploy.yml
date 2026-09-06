@@ -14,11 +14,11 @@ jobs:
           host: ${{ secrets.ORACLE_HOST }}
           username: ${{ secrets.ORACLE_USER }}
           key: ${{ secrets.ORACLE_SSH_KEY }}
-          envs: TELEGRAM_BOT_TOKEN,MCP_HOST,WEB_ALLOWED_ORIGINS
+          envs: TELEGRAM_BOT_TOKEN,MCP_HOST,WEB_ALLOWED_ORIGINS,MCP_AUTH_TOKEN
           script: |
             cd ~/flashcard-telegram-bot
             git pull origin main
-            printf "TELEGRAM_BOT_TOKEN=%s\nMCP_HOST=%s\nWEB_ALLOWED_ORIGINS=%s\n" "$TELEGRAM_BOT_TOKEN" "$MCP_HOST" "$WEB_ALLOWED_ORIGINS" > .env
+            printf "TELEGRAM_BOT_TOKEN=%s\nMCP_HOST=%s\nWEB_ALLOWED_ORIGINS=%s\nMCP_AUTH_TOKEN=%s\n" "$TELEGRAM_BOT_TOKEN" "$MCP_HOST" "$WEB_ALLOWED_ORIGINS" "$MCP_AUTH_TOKEN" > .env
             chmod 600 .env
             source venv/bin/activate
             pip install -r requirements.txt --quiet
@@ -28,3 +28,4 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           MCP_HOST: ${{ secrets.MCP_HOST }}
           WEB_ALLOWED_ORIGINS: ${{ secrets.WEB_ALLOWED_ORIGINS }}
+          MCP_AUTH_TOKEN: ${{ secrets.MCP_AUTH_TOKEN }}

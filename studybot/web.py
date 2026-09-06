@@ -242,3 +242,34 @@ def register(server) -> None:
         tags = (body.get("tags") or "").strip() or None
         note_id = db.add_session_note(cid, topic, content, tags=tags)
         return JSONResponse({"id": note_id, "topic": topic})
+
+    # --- auth: these three stay reachable without a session (see _RequireAuth in
+    # mcp/server.py, which special-cases /api/auth/*) ---
+
+    @server.custom_route("/api/auth/status", methods=["GET"])
+    async def auth_status(request: Request) -> Response:
+        return JSONResponse({"registered": db.account_exists()})
+
+    @server.custom_route("/api/auth/register", methods=["POST"])
+    async def auth_register(request: Request) -> Response:
+        body = await request.json()
+        try:
+            token = db.register(body.get("username", ""), body.get("password", ""))
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=409)
+        return JSONResponse({"token": token}, status_code=201)
+
+    @server.custom_route("/api/auth/login", methods=["POST"])
+    async def auth_login(request: Request) -> Response:
+        body = await request.json()
+        token = db.login(body.get("username", ""), body.get("password", ""))
+        if token is None:
+            return JSONResponse({"error": "invalid username or password"}, status_code=401)
+        return JSONResponse({"token": token})
+
+    @server.custom_route("/api/auth/logout", methods=["POST"])
+    async def auth_logout(request: Request) -> Response:
+        auth = request.headers.get("authorization", "")
+        token = auth[7:] if auth.startswith("Bearer ") else ""
+        db.logout(token)
+        return JSONResponse({"ok": True})
