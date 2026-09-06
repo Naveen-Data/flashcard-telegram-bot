@@ -34,3 +34,29 @@ def list_session_notes(user_id: int, limit: int = 20) -> list[dict]:
             {"uid": user_id, "lim": limit},
         )
         return [dict(r._mapping) for r in rows]
+
+
+def edit_session_note(
+    user_id: int, note_id: int, topic: Optional[str] = None,
+    content: Optional[str] = None, tags: Optional[str] = None,
+) -> bool:
+    sets, params = [], {"uid": user_id, "id": note_id}
+    for col, val in (("topic", topic), ("content", content), ("tags", tags)):
+        if val is not None:
+            sets.append(f"{col}=:{col}")
+            params[col] = val
+    if not sets:
+        return False
+    with get_connection() as conn:
+        result = conn.execute(
+            text(f"UPDATE session_notes SET {', '.join(sets)} WHERE id=:id AND user_id=:uid"), params
+        )
+        return result.rowcount > 0
+
+
+def delete_session_note(user_id: int, note_id: int) -> bool:
+    with get_connection() as conn:
+        result = conn.execute(
+            text("DELETE FROM session_notes WHERE id=:id AND user_id=:uid"), {"id": note_id, "uid": user_id}
+        )
+        return result.rowcount > 0
