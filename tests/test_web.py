@@ -121,10 +121,32 @@ check("web answers are undoable", db.apply_undo(uid1) is True)
 check("answer with bad quality rejected", client1.post("/api/answer", json={"id": basic, "quality": 99}).status_code == 400)
 check("answer on nonexistent card is 404", client1.post("/api/answer", json={"id": 999999999, "quality": 4}).status_code == 404)
 
+# edit/delete a card via the web API
+r = client1.patch(f"/api/cards/{basic}", json={"question": "What is X really?", "tags": "edited"})
+check("edit card via web", r.status_code == 200 and r.json()["question"] == "What is X really?", r.text[:200])
+check("edit card is owner-scoped", client1.patch(f"/api/cards/{other}", json={"question": "hacked"}).status_code == 404)
+check("edit nonexistent card is 404", client1.patch("/api/cards/999999999", json={"question": "x"}).status_code == 404)
+check("delete someone else's card is 404", client1.delete(f"/api/cards/{other}").status_code == 404)
+scratch_card = db.add_card("scratch", "scratch", uid1)
+check("delete own card via web", client1.delete(f"/api/cards/{scratch_card}").status_code == 200)
+check("card actually gone", db.get_card(uid1, scratch_card) is None)
+
 r = client1.post("/api/notes", json={"topic": "t", "content": "c"})
 check("add note", r.status_code == 200)
 r = client1.get("/api/notes")
 check("notes serialize created_at as a string", isinstance(r.json()[0]["created_at"], str))
+note_id = r.json()[0]["id"]
+
+check("bob cannot edit alice's note", db.edit_session_note(uid2, note_id, content="hacked") is False)
+check("bob cannot delete alice's note", db.delete_session_note(uid2, note_id) is False)
+
+# edit/delete a note via the web API
+r = client1.patch(f"/api/notes/{note_id}", json={"content": "updated content"})
+check("edit note via web", r.status_code == 200, r.text[:200])
+check("note actually updated", any(n["content"] == "updated content" for n in db.list_session_notes(uid1)))
+check("edit nonexistent note is 404", client1.patch("/api/notes/999999999", json={"content": "x"}).status_code == 404)
+check("delete note via web", client1.delete(f"/api/notes/{note_id}").status_code == 200)
+check("note actually gone", not any(n["id"] == note_id for n in db.list_session_notes(uid1)))
 
 # change-password: requires a live session, old password must be correct
 r = client1.post("/api/auth/change-password", json={"old_password": "wrong", "new_password": "new-pw-12345"})
@@ -162,6 +184,9 @@ check("CORS does not reflect arbitrary origins", "access-control-allow-origin" n
 r = anon.options("/api/tokens/1", headers={"Origin": "http://localhost:5173",
                                             "Access-Control-Request-Method": "DELETE"})
 check("CORS preflight allows DELETE (token revoke)", r.status_code < 400, r.text[:200])
+
+r = anon.options("/api/cards/1", headers={"Origin": "http://localhost:5173", "Access-Control-Request-Method": "PATCH"})
+check("CORS preflight allows PATCH (card/note edit)", r.status_code < 400, r.text[:200])
 
 # claude.ai must be allowed to preflight /mcp when it's in WEB_ALLOWED_ORIGINS
 # (production always sets it there) — otherwise Claude's own client is blocked

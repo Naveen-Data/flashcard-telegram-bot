@@ -58,7 +58,7 @@ from studybot.db.users import (
     get_user_id_for_telegram,
     list_notification_targets,
 )
-from studybot.db.notes import add_session_note, list_session_notes
+from studybot.db.notes import add_session_note, delete_session_note, edit_session_note, list_session_notes
 from studybot.db.reviews import (
     apply_undo,
     clear_undo_snapshot,
@@ -111,6 +111,8 @@ __all__ = [
     "snooze_card",
     # notes
     "add_session_note",
+    "delete_session_note",
+    "edit_session_note",
     "list_session_notes",
     # settings
     "clear_exam",

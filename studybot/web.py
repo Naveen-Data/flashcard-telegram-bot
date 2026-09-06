@@ -269,6 +269,32 @@ def register(server) -> None:
         rows = db.search_cards(uid, term) if term else db.list_all_cards(uid)
         return JSONResponse([card_payload(c) for c in rows[:200]])
 
+    @server.custom_route("/api/cards/{card_id}", methods=["PATCH"])
+    async def edit_card_route(request: Request) -> Response:
+        try:
+            card_id = int(request.path_params["card_id"])
+        except (KeyError, ValueError):
+            return JSONResponse({"error": "invalid card id"}, status_code=400)
+        body = await request.json()
+        ok = db.edit_card(
+            user_id(request), card_id,
+            question=body.get("question"), answer=body.get("answer"),
+            tags=body.get("tags"), notes=body.get("notes"),
+        )
+        if not ok:
+            return JSONResponse({"error": "card not found"}, status_code=404)
+        return JSONResponse(card_payload(db.get_card(user_id(request), card_id)))
+
+    @server.custom_route("/api/cards/{card_id}", methods=["DELETE"])
+    async def delete_card_route(request: Request) -> Response:
+        try:
+            card_id = int(request.path_params["card_id"])
+        except (KeyError, ValueError):
+            return JSONResponse({"error": "invalid card id"}, status_code=400)
+        if not db.delete_card(user_id(request), card_id):
+            return JSONResponse({"error": "card not found"}, status_code=404)
+        return JSONResponse({"ok": True})
+
     @server.custom_route("/api/answer", methods=["POST"])
     async def answer(request: Request) -> Response:
         body = await request.json()
@@ -312,6 +338,31 @@ def register(server) -> None:
         tags = (body.get("tags") or "").strip() or None
         note_id = db.add_session_note(user_id(request), topic, content, tags=tags)
         return JSONResponse({"id": note_id, "topic": topic})
+
+    @server.custom_route("/api/notes/{note_id}", methods=["PATCH"])
+    async def edit_note_route(request: Request) -> Response:
+        try:
+            note_id = int(request.path_params["note_id"])
+        except (KeyError, ValueError):
+            return JSONResponse({"error": "invalid note id"}, status_code=400)
+        body = await request.json()
+        ok = db.edit_session_note(
+            user_id(request), note_id,
+            topic=body.get("topic"), content=body.get("content"), tags=body.get("tags"),
+        )
+        if not ok:
+            return JSONResponse({"error": "note not found"}, status_code=404)
+        return JSONResponse({"ok": True})
+
+    @server.custom_route("/api/notes/{note_id}", methods=["DELETE"])
+    async def delete_note_route(request: Request) -> Response:
+        try:
+            note_id = int(request.path_params["note_id"])
+        except (KeyError, ValueError):
+            return JSONResponse({"error": "invalid note id"}, status_code=400)
+        if not db.delete_session_note(user_id(request), note_id):
+            return JSONResponse({"error": "note not found"}, status_code=404)
+        return JSONResponse({"ok": True})
 
     # --- MCP personal access tokens ---
 
