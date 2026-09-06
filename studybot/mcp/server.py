@@ -260,9 +260,16 @@ _register_web(mcp_server)
 # requests to /api/* and /app cross origins. Vite's dev-server ports are allowed
 # unconditionally so local frontend dev needs no env var; the deployed Vercel
 # origin(s) come from WEB_ALLOWED_ORIGINS (comma-separated) once that's known.
+#
+# claude.ai is allowed unconditionally too: /mcp exists specifically for MCP
+# clients like Claude to call, and Claude's web/desktop client runs the actual
+# request from that origin — without it, the browser blocks the request with
+# a CORS preflight failure before a bearer token is ever checked, which looks
+# to the client like "can't connect to a valid MCP server" rather than a 401.
 _DEV_ORIGINS = [
     "http://localhost:5173", "http://127.0.0.1:5173",
     "http://localhost:5183", "http://127.0.0.1:5183",
+    "https://claude.ai",
 ]
 
 # register/login/logout stay reachable without a credential — someone has to be
