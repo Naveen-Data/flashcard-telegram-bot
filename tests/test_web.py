@@ -13,6 +13,7 @@ from starlette.testclient import TestClient  # noqa: E402
 
 from studybot import db  # noqa: E402
 from studybot.mcp.server import build_app  # noqa: E402
+from studybot.mcp.server import _RATE_LIMIT_RULES  # noqa: E402
 from studybot.review import card_payload  # noqa: E402
 
 db.init_db()
@@ -119,5 +120,41 @@ with TestClient(build_app()) as mcp_gated:
     assert mcp_gated.post("/mcp", headers={"Authorization": "Bearer mcp-secret"}).status_code != 401
     assert mcp_gated.get("/api/auth/status").status_code == 200, "/mcp token must not affect /api/auth/*"
 del os.environ["MCP_AUTH_TOKEN"]
+
+# --- rate limiting: brute force / spam on login & register, a ceiling elsewhere ---
+
+
+def _limit_for(prefix, method):
+    for p, m, limit, _window in _RATE_LIMIT_RULES:
+        if p == prefix and m == method:
+            return limit
+    raise AssertionError(f"no rate limit rule for {method} {prefix}")
+
+
+login_limit = _limit_for("/api/auth/login", "POST")
+with TestClient(build_app()) as limited:
+    for _ in range(login_limit):
+        r = limited.post("/api/auth/login", json={"username": "nope", "password": "nope"})
+        assert r.status_code == 401, "attempts within the limit reach real auth logic"
+    r = limited.post("/api/auth/login", json={"username": "nope", "password": "nope"})
+    assert r.status_code == 429, f"request past the {login_limit}-attempt limit must be rejected"
+    assert "Retry-After" in r.headers
+
+    # a different client IP (via X-Forwarded-For) gets its own bucket on the same
+    # app instance — one visitor's spam can't lock another visitor out
+    r = limited.post(
+        "/api/auth/login",
+        json={"username": "nope", "password": "nope"},
+        headers={"X-Forwarded-For": "203.0.113.9"},
+    )
+    assert r.status_code == 401, "a different client IP must not share the exhausted bucket"
+
+register_limit = _limit_for("/api/auth/register", "POST")
+with TestClient(build_app()) as limited:
+    for _ in range(register_limit):
+        r = limited.post("/api/auth/register", json={"username": "x", "password": "longenough1"})
+        assert r.status_code == 409, "account already exists — but the request must still land"
+    r = limited.post("/api/auth/register", json={"username": "y", "password": "longenough1"})
+    assert r.status_code == 429, f"request past the {register_limit}-attempt limit must be rejected"
 
 print("web api ok")

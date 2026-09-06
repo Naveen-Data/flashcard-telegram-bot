@@ -2,6 +2,8 @@ import asyncio
 import hmac
 import logging
 import os
+import time
+from collections import defaultdict, deque
 from typing import Optional
 
 from mcp.server.mcpserver import MCPServer
@@ -305,9 +307,74 @@ class _RequireAuth:
         await self.app(scope, receive, send)
 
 
+# (path_prefix, method_or_None, max_requests, window_seconds) — first match wins,
+# an unmatched path (e.g. /app) is never limited. Login/register get the tight
+# limits since they're the actual brute-force/spam targets; /mcp and general
+# /api/* just need a ceiling against a runaway client or script.
+_RATE_LIMIT_RULES: list[tuple[str, Optional[str], int, float]] = [
+    ("/api/auth/login", "POST", 5, 300),
+    ("/api/auth/register", "POST", 3, 900),
+    ("/mcp", None, 120, 60),
+    ("/api/", None, 60, 60),
+]
+
+
+class _RateLimit:
+    """Fixed-window rate limit per client IP, in memory.
+
+    Fine for a single uvicorn process (this deployment); would need a shared
+    store (e.g. Redis) if this ever ran behind multiple workers. Reads the
+    real client from X-Forwarded-For when present — nginx must set that header
+    for limits to be per-visitor rather than one shared bucket for everyone
+    behind the proxy (`proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`).
+    """
+
+    def __init__(self, app, rules=_RATE_LIMIT_RULES):
+        self.app = app
+        self.rules = rules
+        self.hits: dict[tuple[str, int], deque] = defaultdict(deque)
+
+    @staticmethod
+    def _client_ip(scope) -> str:
+        headers = dict(scope.get("headers", []))
+        forwarded = headers.get(b"x-forwarded-for")
+        if forwarded:
+            return forwarded.decode().split(",")[0].strip()
+        client = scope.get("client")
+        return client[0] if client else "unknown"
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] == "OPTIONS":
+            await self.app(scope, receive, send)
+            return
+
+        path, method = scope["path"], scope["method"]
+        for i, (prefix, rule_method, limit, window) in enumerate(self.rules):
+            if not path.startswith(prefix) or (rule_method and rule_method != method):
+                continue
+            key = (self._client_ip(scope), i)
+            hits = self.hits[key]
+            now = time.monotonic()
+            while hits and now - hits[0] > window:
+                hits.popleft()
+            if len(hits) >= limit:
+                retry_after = max(1, round(window - (now - hits[0])))
+                await JSONResponse(
+                    {"error": "Too many requests"},
+                    status_code=429,
+                    headers={"Retry-After": str(retry_after)},
+                )(scope, receive, send)
+                return
+            hits.append(now)
+            break
+
+        await self.app(scope, receive, send)
+
+
 def build_app(host: str = "127.0.0.1"):
     app = mcp_server.streamable_http_app(streamable_http_path="/mcp", host=host)
     app = _RequireAuth(app, os.environ.get("MCP_AUTH_TOKEN"))
+    app = _RateLimit(app)
     extra_origins = [o.strip() for o in os.environ.get("WEB_ALLOWED_ORIGINS", "").split(",") if o.strip()]
     return CORSMiddleware(
         app,
