@@ -44,6 +44,7 @@ from studybot.db.settings import (
     set_study_window,
     update_streak,
 )
+from studybot.db.auth import account_exists, login, logout, register, verify_session
 from studybot.db.notes import add_session_note, list_session_notes
 from studybot.db.reviews import (
     apply_undo,
@@ -62,6 +63,12 @@ from studybot.db.reviews import (
 __all__ = [
     "DB_PATH",
     "init_db",
+    # auth
+    "account_exists",
+    "login",
+    "logout",
+    "register",
+    "verify_session",
     # cards
     "add_card",
     "add_card_with_reverse",

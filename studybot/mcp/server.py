@@ -1,10 +1,12 @@
 import asyncio
+import hmac
 import logging
 import os
 from typing import Optional
 
 from mcp.server.mcpserver import MCPServer
 from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse
 
 from studybot import db
 
@@ -256,15 +258,62 @@ _DEV_ORIGINS = [
     "http://localhost:5183", "http://127.0.0.1:5183",
 ]
 
+# /app (the SPA shell) and /api/auth/* (register, login, status) stay reachable
+# without any credential — the shell has to load and let someone log in before
+# anything else is possible. CORS preflight OPTIONS is never gated either way.
+_PUBLIC_PREFIXES = ("/api/auth/",)
+
+
+class _RequireAuth:
+    """Two different auth models behind one gate, because the two clients are
+    different shapes: Claude Code (/mcp) sends one static secret it was configured
+    with once; a browser (/api/*) logs a human in and gets a session token back.
+
+    /mcp: no-op if MCP_AUTH_TOKEN is unset, so deploying this before the secret
+    exists doesn't take the server down.
+    /api/*: always enforced via studybot.db.verify_session — registration always
+    works regardless of any env var.
+    """
+
+    def __init__(self, app, mcp_token: str | None):
+        self.app = app
+        self.mcp_token = mcp_token
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get("path", "")
+        if (
+            scope["type"] != "http"
+            or scope["method"] == "OPTIONS"
+            or path.startswith(_PUBLIC_PREFIXES)
+            or not (path.startswith("/api/") or path.startswith("/mcp"))
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        auth = headers.get(b"authorization", b"").decode()
+        token = auth[7:] if auth.startswith("Bearer ") else ""
+
+        if path.startswith("/mcp"):
+            ok = not self.mcp_token or hmac.compare_digest(token, self.mcp_token)
+        else:
+            ok = db.verify_session(token)
+
+        if not ok:
+            await JSONResponse({"error": "Unauthorized"}, status_code=401)(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
 
 def build_app(host: str = "127.0.0.1"):
     app = mcp_server.streamable_http_app(streamable_http_path="/mcp", host=host)
+    app = _RequireAuth(app, os.environ.get("MCP_AUTH_TOKEN"))
     extra_origins = [o.strip() for o in os.environ.get("WEB_ALLOWED_ORIGINS", "").split(",") if o.strip()]
     return CORSMiddleware(
         app,
         allow_origins=_DEV_ORIGINS + extra_origins,
         allow_methods=["GET", "POST"],
-        allow_headers=["Content-Type"],
+        allow_headers=["Content-Type", "Authorization"],
     )
 
 

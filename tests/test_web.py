@@ -1,4 +1,5 @@
 """Self-check for the web API. Run: python tests/test_web.py"""
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -25,9 +26,35 @@ p = card_payload(db.get_card(cloze))
 assert p["front"] == "The [...] is the powerhouse", p["front"]
 assert p["back"] == "The mitochondria is the powerhouse", p["back"]
 
-client = TestClient(build_app())
+anon = TestClient(build_app())
 
-assert "<title>Study</title>" in client.get("/app").text
+# --- auth: register, login, wrong password, one-account-only, sessions ---
+
+assert anon.get("/api/auth/status").json() == {"registered": False}
+assert anon.get("/api/due").status_code == 401, "no session yet — must be rejected"
+
+r = anon.post("/api/auth/register", json={"username": "naveen", "password": "short"})
+assert r.status_code == 409, "under 8 chars must be rejected"
+
+r = anon.post("/api/auth/register", json={"username": "naveen", "password": "correct horse"})
+assert r.status_code == 201, r.text
+token = r.json()["token"]
+assert token
+
+assert anon.get("/api/auth/status").json() == {"registered": True}
+
+r = anon.post("/api/auth/register", json={"username": "someoneelse", "password": "whatever12"})
+assert r.status_code == 409, "a second account must be refused"
+
+assert anon.post("/api/auth/login", json={"username": "naveen", "password": "wrong"}).status_code == 401
+r = anon.post("/api/auth/login", json={"username": "naveen", "password": "correct horse"})
+assert r.status_code == 200 and r.json()["token"], "correct password must log in"
+
+client = TestClient(build_app(), headers={"Authorization": f"Bearer {token}"})
+assert client.get("/api/due").status_code == 200, "valid session must be accepted"
+assert anon.get("/api/due", headers={"Authorization": "Bearer garbage"}).status_code == 401
+
+# --- everything below uses the authenticated client ---
 
 due = client.get("/api/due").json()
 assert due == [], f"nothing is due one day after creation, got {due}"
@@ -60,11 +87,37 @@ s = client.get("/api/stats").json()
 assert s["deck"]["total"] == 2
 assert len(s["forecast"]) == 8
 
-# CORS: the deployed frontend lives on a different origin (Vercel) from the
-# backend (Oracle VM), and the dev-server origin must work without any env var.
-r = client.get("/api/due", headers={"Origin": "http://localhost:5173"})
+# logout must actually invalidate the session
+assert client.post("/api/auth/logout").status_code == 200
+assert client.get("/api/due").status_code == 401, "session must be dead after logout"
+
+# --- public surfaces: unaffected by any of the above ---
+
+assert "<title>Study</title>" in anon.get("/app").text, "SPA shell never requires a session"
+
+r = anon.get("/api/due", headers={"Origin": "http://localhost:5173"})
+assert r.status_code == 401  # still gated — this only checks the CORS header shape
 assert r.headers.get("access-control-allow-origin") == "http://localhost:5173", dict(r.headers)
-r = client.get("/api/due", headers={"Origin": "https://evil.example.com"})
+r = anon.get("/api/due", headers={"Origin": "https://evil.example.com"})
 assert "access-control-allow-origin" not in r.headers, "must not reflect arbitrary origins"
+
+r = anon.options(
+    "/api/due",
+    headers={"Origin": "http://localhost:5173", "Access-Control-Request-Method": "GET"},
+)
+assert r.status_code < 400, "CORS preflight must never be gated"
+
+# --- /mcp: separate static-secret model for Claude Code, independent of sessions ---
+
+with TestClient(build_app()) as mcp_anon:
+    assert mcp_anon.post("/mcp").status_code != 401, "no-op when MCP_AUTH_TOKEN is unset"
+
+os.environ["MCP_AUTH_TOKEN"] = "mcp-secret"
+with TestClient(build_app()) as mcp_gated:
+    assert mcp_gated.post("/mcp").status_code == 401
+    assert mcp_gated.post("/mcp", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert mcp_gated.post("/mcp", headers={"Authorization": "Bearer mcp-secret"}).status_code != 401
+    assert mcp_gated.get("/api/auth/status").status_code == 200, "/mcp token must not affect /api/auth/*"
+del os.environ["MCP_AUTH_TOKEN"]
 
 print("web api ok")
