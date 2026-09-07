@@ -137,6 +137,11 @@ r = client1.get("/api/notes")
 check("notes serialize created_at as a string", isinstance(r.json()[0]["created_at"], str))
 note_id = r.json()[0]["id"]
 
+r = client1.get("/api/notes?q=" + r.json()[0]["topic"][:1])
+check("note search matches by topic", any(n["id"] == note_id for n in r.json()), r.text[:200])
+r = client1.get("/api/notes?q=zzzznonexistent")
+check("note search with no match returns empty", r.json() == [])
+
 check("bob cannot edit alice's note", db.edit_session_note(uid2, note_id, content="hacked") is False)
 check("bob cannot delete alice's note", db.delete_session_note(uid2, note_id) is False)
 

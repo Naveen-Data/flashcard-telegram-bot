@@ -36,6 +36,20 @@ def list_session_notes(user_id: int, limit: int = 20) -> list[dict]:
         return [dict(r._mapping) for r in rows]
 
 
+def search_session_notes(user_id: int, keyword: str, limit: int = 50) -> list[dict]:
+    pattern = f"%{keyword}%"
+    with get_connection() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT id, topic, content, tags, created_at FROM session_notes"
+                " WHERE user_id=:uid AND (topic ILIKE :p OR content ILIKE :p OR tags ILIKE :p)"
+                " ORDER BY created_at DESC LIMIT :lim"
+            ),
+            {"uid": user_id, "p": pattern, "lim": limit},
+        )
+        return [dict(r._mapping) for r in rows]
+
+
 def edit_session_note(
     user_id: int, note_id: int, topic: Optional[str] = None,
     content: Optional[str] = None, tags: Optional[str] = None,

@@ -323,7 +323,9 @@ def register(server) -> None:
 
     @server.custom_route("/api/notes", methods=["GET"])
     async def notes(request: Request) -> Response:
-        rows = db.list_session_notes(user_id(request))
+        uid = user_id(request)
+        term = request.query_params.get("q", "").strip()
+        rows = db.search_session_notes(uid, term) if term else db.list_session_notes(uid)
         for r in rows:
             r["created_at"] = _iso(r["created_at"])
         return JSONResponse(rows)
