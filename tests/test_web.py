@@ -113,6 +113,36 @@ with get_connection() as conn:
 due = client1.get("/api/due").json()
 check("due list only has alice's cards, cloze rendered", len(due) == 2 and all("front" in c for c in due))
 
+# --- topics: single coarse bucket per card, alongside the existing multi-value tags ---
+
+topic_card = db.add_card("What is CAP theorem?", "consistency/availability/partition", uid1, topic="System-Design")
+check("topic is canonicalised (trimmed/lowercased)", db.get_card(uid1, topic_card)["topic"] == "system-design")
+topic_card2 = db.add_card("Another system design Q", "A", uid1, topic="system-design")
+prog_card = db.add_card("A programming Q", "A", uid1, topic="programming")
+check("edit_card can set topic", db.edit_card(uid1, basic, topic="programming") is True)
+with get_connection() as conn:
+    conn.execute(text("UPDATE cards SET due_at = now() - interval '1 day' WHERE id IN (:a, :b)"),
+                 {"a": topic_card, "b": topic_card2})
+check(
+    "list_due_cards filters by topic",
+    {c["id"] for c in db.list_due_cards(uid1, topic="system-design")} == {topic_card, topic_card2},
+)
+check("list_all_cards filters by topic", len(db.list_all_cards(uid1, topic="system-design")) == 2)
+check(
+    "search_cards can be scoped to a topic",
+    all(c["topic"] == "programming" for c in db.search_cards(uid1, "Q", topic="programming")),
+)
+topics1 = dict((t, total) for t, total, _due in db.list_topics(uid1))
+check("list_topics reports correct counts", topics1.get("system-design") == 2 and topics1.get("programming") == 2)
+check("topics are user-scoped (bob has none)", db.list_topics(uid2) == [])
+
+r = client1.get("/api/due?topic=system-design")
+check("web /api/due?topic= filters correctly", {c["id"] for c in r.json()} == {topic_card, topic_card2}, r.text[:200])
+r = client1.get("/api/cards?topic=programming")
+check("web /api/cards?topic= filters correctly", all(c["topic"] == "programming" for c in r.json()))
+r = client1.get("/api/topics")
+check("web /api/topics lists topics with counts", any(t["topic"] == "system-design" and t["total"] == 2 for t in r.json()), r.text[:200])
+
 r = client1.post("/api/answer", json={"id": basic, "quality": 4})
 check("answer succeeds and serializes due_at as a string", r.status_code == 200 and isinstance(r.json()["due_at"], str))
 check("answering wrote FSRS state", db.get_card(uid1, basic)["stability"] is not None)
@@ -122,8 +152,9 @@ check("answer with bad quality rejected", client1.post("/api/answer", json={"id"
 check("answer on nonexistent card is 404", client1.post("/api/answer", json={"id": 999999999, "quality": 4}).status_code == 404)
 
 # edit/delete a card via the web API
-r = client1.patch(f"/api/cards/{basic}", json={"question": "What is X really?", "tags": "edited"})
+r = client1.patch(f"/api/cards/{basic}", json={"question": "What is X really?", "tags": "edited", "topic": "ai"})
 check("edit card via web", r.status_code == 200 and r.json()["question"] == "What is X really?", r.text[:200])
+check("edit card via web can change topic", r.json()["topic"] == "ai", r.text[:200])
 check("edit card is owner-scoped", client1.patch(f"/api/cards/{other}", json={"question": "hacked"}).status_code == 404)
 check("edit nonexistent card is 404", client1.patch("/api/cards/999999999", json={"question": "x"}).status_code == 404)
 check("delete someone else's card is 404", client1.delete(f"/api/cards/{other}").status_code == 404)
@@ -248,10 +279,14 @@ with TestClient(build_app(host="0.0.0.0"), base_url="http://127.0.0.1") as mcp_c
     sid1, r = mcp_session(mcp_client, raw1)
     check("mcp session initializes with a valid personal token", sid1 is not None, r.text[:200])
 
-    r = mcp_call(mcp_client, raw1, sid1, "add_card", {"question": "mcp Q", "answer": "mcp A"})
+    r = mcp_call(mcp_client, raw1, sid1, "add_card", {"question": "mcp Q", "answer": "mcp A", "topic": "AI"})
     added = tool_result(r)
     mcp_card_id = added.get("id")
     check("mcp add_card resolves to the token's owner", mcp_card_id is not None, str(added))
+    check("mcp add_card accepts and canonicalises topic", db.get_card(uid1, mcp_card_id)["topic"] == "ai")
+
+    r = mcp_call(mcp_client, raw1, sid1, "list_topics", {})
+    check("mcp list_topics includes the new topic", any(t["topic"] == "ai" for t in tool_result(r)), str(tool_result(r))[:200])
 
     sid2, _ = mcp_session(mcp_client, raw2)
     r = mcp_call(mcp_client, raw2, sid2, "get_card_history", {"card_id": mcp_card_id})

@@ -260,14 +260,21 @@ def register(server) -> None:
 
     @server.custom_route("/api/due", methods=["GET"])
     async def due(request: Request) -> Response:
-        return JSONResponse([card_payload(c) for c in db.list_due_cards(user_id(request))])
+        topic = request.query_params.get("topic", "").strip() or None
+        return JSONResponse([card_payload(c) for c in db.list_due_cards(user_id(request), topic=topic)])
 
     @server.custom_route("/api/cards", methods=["GET"])
     async def cards(request: Request) -> Response:
         uid = user_id(request)
         term = request.query_params.get("q", "").strip()
-        rows = db.search_cards(uid, term) if term else db.list_all_cards(uid)
+        topic = request.query_params.get("topic", "").strip() or None
+        rows = db.search_cards(uid, term, topic=topic) if term else db.list_all_cards(uid, topic=topic)
         return JSONResponse([card_payload(c) for c in rows[:200]])
+
+    @server.custom_route("/api/topics", methods=["GET"])
+    async def topics(request: Request) -> Response:
+        rows = db.list_topics(user_id(request))
+        return JSONResponse([{"topic": t, "total": total, "due": due} for t, total, due in rows])
 
     @server.custom_route("/api/cards/{card_id}", methods=["PATCH"])
     async def edit_card_route(request: Request) -> Response:
@@ -279,7 +286,7 @@ def register(server) -> None:
         ok = db.edit_card(
             user_id(request), card_id,
             question=body.get("question"), answer=body.get("answer"),
-            tags=body.get("tags"), notes=body.get("notes"),
+            tags=body.get("tags"), notes=body.get("notes"), topic=body.get("topic"),
         )
         if not ok:
             return JSONResponse({"error": "card not found"}, status_code=404)

@@ -30,6 +30,14 @@ def _canon_tags(tags: Optional[str]) -> Optional[str]:
     return ",".join(seen) if seen else None
 
 
+def _canon_topic(topic: Optional[str]) -> Optional[str]:
+    """A card has at most one topic — the coarse bucket tags live inside."""
+    if not topic:
+        return None
+    topic = topic.strip().lower()
+    return topic or None
+
+
 def _row(row) -> Optional[dict]:
     return dict(row._mapping) if row is not None else None
 
@@ -37,20 +45,20 @@ def _row(row) -> Optional[dict]:
 def add_card(
     question: str, answer: str, user_id: int, tags: Optional[str] = None,
     card_type: str = "basic", image_file_id: Optional[str] = None,
-    notes: Optional[str] = None, reverse_of: Optional[int] = None,
+    notes: Optional[str] = None, reverse_of: Optional[int] = None, topic: Optional[str] = None,
 ) -> int:
     now = _now()
     with get_connection() as conn:
         return conn.execute(
             text(
-                "INSERT INTO cards (question, answer, stage, due_at, created_at, user_id, tags,"
+                "INSERT INTO cards (question, answer, stage, due_at, created_at, user_id, tags, topic,"
                 " ease_factor, interval_days, repetitions, card_type, image_file_id, notes, reverse_of)"
-                " VALUES (:q, :a, 0, :due, :created, :uid, :tags, 2.5, 1, 0, :ctype, :img, :notes, :rev)"
+                " VALUES (:q, :a, 0, :due, :created, :uid, :tags, :topic, 2.5, 1, 0, :ctype, :img, :notes, :rev)"
                 " RETURNING id"
             ),
             {
                 "q": question, "a": answer, "due": now + timedelta(days=1), "created": now,
-                "uid": user_id, "tags": _canon_tags(tags), "ctype": card_type,
+                "uid": user_id, "tags": _canon_tags(tags), "topic": _canon_topic(topic), "ctype": card_type,
                 "img": image_file_id, "notes": notes, "rev": reverse_of,
             },
         ).scalar_one()
@@ -58,11 +66,11 @@ def add_card(
 
 def add_card_with_reverse(
     question: str, answer: str, user_id: int, tags: Optional[str] = None,
-    notes: Optional[str] = None,
+    notes: Optional[str] = None, topic: Optional[str] = None,
 ) -> tuple[int, int]:
     """Create a card plus its mirror (answer->question), scheduled independently."""
-    forward_id = add_card(question, answer, user_id, tags=tags, notes=notes)
-    reverse_id = add_card(answer, question, user_id, tags=tags, notes=notes, reverse_of=forward_id)
+    forward_id = add_card(question, answer, user_id, tags=tags, notes=notes, topic=topic)
+    reverse_id = add_card(answer, question, user_id, tags=tags, notes=notes, reverse_of=forward_id, topic=topic)
     return forward_id, reverse_id
 
 
@@ -76,13 +84,14 @@ def add_cards_bulk(cards: list[dict], user_id: int) -> list[int]:
         for card in cards:
             card_id = conn.execute(
                 text(
-                    "INSERT INTO cards (question, answer, stage, due_at, created_at, user_id, tags,"
+                    "INSERT INTO cards (question, answer, stage, due_at, created_at, user_id, tags, topic,"
                     " ease_factor, interval_days, repetitions, notes)"
-                    " VALUES (:q, :a, 0, :due, :created, :uid, :tags, 2.5, 1, 0, :notes) RETURNING id"
+                    " VALUES (:q, :a, 0, :due, :created, :uid, :tags, :topic, 2.5, 1, 0, :notes) RETURNING id"
                 ),
                 {
                     "q": card["question"], "a": card["answer"], "due": due, "created": now,
-                    "uid": user_id, "tags": _canon_tags(card.get("tags")), "notes": card.get("notes"),
+                    "uid": user_id, "tags": _canon_tags(card.get("tags")),
+                    "topic": _canon_topic(card.get("topic")), "notes": card.get("notes"),
                 },
             ).scalar_one()
             ids.append(card_id)
@@ -91,14 +100,14 @@ def add_cards_bulk(cards: list[dict], user_id: int) -> list[int]:
 
 def edit_card(
     user_id: int, card_id: int, question: Optional[str] = None, answer: Optional[str] = None,
-    tags: Optional[str] = None, notes: Optional[str] = None,
+    tags: Optional[str] = None, notes: Optional[str] = None, topic: Optional[str] = None,
 ) -> bool:
     """Update whichever fields are provided. Returns False if the card doesn't exist or isn't owned."""
     updates: list[str] = []
     params: dict = {"uid": user_id, "id": card_id}
     for column, value, transform in (
         ("question", question, None), ("answer", answer, None),
-        ("tags", tags, _canon_tags), ("notes", notes, None),
+        ("tags", tags, _canon_tags), ("notes", notes, None), ("topic", topic, _canon_topic),
     ):
         if value is not None:
             updates.append(f"{column} = :{column}")
@@ -152,42 +161,54 @@ def list_suspended(user_id: int) -> list[dict]:
         return [dict(r._mapping) for r in rows]
 
 
-def list_due_cards(user_id: int, tag: Optional[str] = None) -> list[dict]:
+def _tag_topic_filter(tag: Optional[str], topic: Optional[str], params: dict) -> str:
+    clause = ""
+    if tag:
+        clause += " AND string_to_array(tags, ',') @> ARRAY[:tag]"
+        params["tag"] = tag.strip().lower()
+    if topic:
+        clause += " AND topic=:topic"
+        params["topic"] = topic.strip().lower()
+    return clause
+
+
+def list_due_cards(user_id: int, tag: Optional[str] = None, topic: Optional[str] = None) -> list[dict]:
     now = _now()
+    params: dict = {"uid": user_id, "now": now}
+    clause = _tag_topic_filter(tag, topic, params)
     with get_connection() as conn:
-        if tag:
-            rows = conn.execute(
-                text(
-                    f"SELECT * FROM cards WHERE user_id=:uid AND due_at<=:now AND {_ACTIVE}"
-                    " AND string_to_array(tags, ',') @> ARRAY[:tag] ORDER BY due_at"
-                ),
-                {"uid": user_id, "now": now, "tag": tag.strip().lower()},
-            )
-        else:
-            rows = conn.execute(
-                text(f"SELECT * FROM cards WHERE user_id=:uid AND due_at<=:now AND {_ACTIVE} ORDER BY due_at"),
-                {"uid": user_id, "now": now},
-            )
+        rows = conn.execute(
+            text(f"SELECT * FROM cards WHERE user_id=:uid AND due_at<=:now AND {_ACTIVE}{clause} ORDER BY due_at"),
+            params,
+        )
         return [dict(r._mapping) for r in rows]
 
 
-def list_all_cards(user_id: int, tag: Optional[str] = None) -> list[dict]:
+def list_all_cards(user_id: int, tag: Optional[str] = None, topic: Optional[str] = None) -> list[dict]:
+    now = _now()
+    params: dict = {"uid": user_id, "now": now}
+    clause = _tag_topic_filter(tag, topic, params)
+    with get_connection() as conn:
+        rows = conn.execute(
+            text(f"SELECT * FROM cards WHERE user_id=:uid AND {_ACTIVE}{clause} ORDER BY due_at"),
+            params,
+        )
+        return [dict(r._mapping) for r in rows]
+
+
+def list_topics(user_id: int) -> list[tuple[str, int, int]]:
+    """Distinct topics with total and due counts — same shape as list_tags."""
     now = _now()
     with get_connection() as conn:
-        if tag:
-            rows = conn.execute(
-                text(
-                    f"SELECT * FROM cards WHERE user_id=:uid AND {_ACTIVE}"
-                    " AND string_to_array(tags, ',') @> ARRAY[:tag] ORDER BY due_at"
-                ),
-                {"uid": user_id, "now": now, "tag": tag.strip().lower()},
-            )
-        else:
-            rows = conn.execute(
-                text(f"SELECT * FROM cards WHERE user_id=:uid AND {_ACTIVE} ORDER BY due_at"),
-                {"uid": user_id, "now": now},
-            )
-        return [dict(r._mapping) for r in rows]
+        rows = conn.execute(
+            text(
+                "SELECT topic, COUNT(*) AS total, COUNT(*) FILTER (WHERE due_at<=:now) AS due"
+                f" FROM cards WHERE user_id=:uid AND topic IS NOT NULL AND {_ACTIVE}"
+                " GROUP BY topic ORDER BY topic"
+            ),
+            {"uid": user_id, "now": now},
+        )
+        return [(r.topic, r.total, r.due) for r in rows]
 
 
 def list_tags(user_id: int) -> list[tuple[str, int, int]]:
@@ -266,12 +287,17 @@ def get_forecast(user_id: int, days: int = 7) -> list[tuple[str, int]]:
     return result
 
 
-def search_cards(user_id: int, keyword: str) -> list[dict]:
+def search_cards(user_id: int, keyword: str, topic: Optional[str] = None) -> list[dict]:
     pattern = f"%{keyword}%"
+    params: dict = {"uid": user_id, "p": pattern}
+    topic_clause = ""
+    if topic:
+        topic_clause = " AND topic=:topic"
+        params["topic"] = topic.strip().lower()
     with get_connection() as conn:
         rows = conn.execute(
-            text("SELECT * FROM cards WHERE user_id=:uid AND (question ILIKE :p OR answer ILIKE :p)"),
-            {"uid": user_id, "p": pattern},
+            text(f"SELECT * FROM cards WHERE user_id=:uid AND (question ILIKE :p OR answer ILIKE :p){topic_clause}"),
+            params,
         )
         return [dict(r._mapping) for r in rows]
 
