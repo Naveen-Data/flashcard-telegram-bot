@@ -37,7 +37,7 @@ def _authed_user(ctx: Context) -> Optional[int]:
 
 @mcp_server.tool()
 def add_card(
-    question: str, answer: str, tags: str = "", notes: str = "", reverse: bool = False,
+    question: str, answer: str, tags: str = "", topic: str = "", notes: str = "", reverse: bool = False,
     ctx: Context = None,
 ) -> dict:
     """Add a single flashcard.
@@ -46,6 +46,9 @@ def add_card(
         question: The prompt side. Keep under 300 chars — Telegram caps messages at 4096.
         answer: The recall side. Keep under 500 chars; split anything longer into two cards.
         tags: Optional comma-separated, e.g. 'python,algorithms'.
+        topic: Optional single coarse bucket, e.g. 'programming', 'rag', 'system-design',
+            'git', 'ai'. Call list_topics first to see what already exists rather than
+            inventing a near-duplicate topic name.
         notes: Optional extra context, shown only after the answer is revealed. Good for
             the "why" behind a fact without bloating the answer itself.
         reverse: If True, also create the mirror card (answer -> question), scheduled
@@ -55,14 +58,15 @@ def add_card(
     if user_id is None:
         return _UNAUTHORIZED
     tags_val = tags.strip() or None
+    topic_val = topic.strip() or None
     notes_val = notes.strip() or None
     if reverse:
         forward_id, reverse_id = db.add_card_with_reverse(
-            question, answer, user_id, tags=tags_val, notes=notes_val
+            question, answer, user_id, tags=tags_val, notes=notes_val, topic=topic_val
         )
         return {"ids": [forward_id, reverse_id], "count": 2, "reverse": True}
-    card_id = db.add_card(question, answer, user_id, tags=tags_val, notes=notes_val)
-    return {"id": card_id, "question": question, "answer": answer, "tags": tags_val}
+    card_id = db.add_card(question, answer, user_id, tags=tags_val, notes=notes_val, topic=topic_val)
+    return {"id": card_id, "question": question, "answer": answer, "tags": tags_val, "topic": topic_val}
 
 
 @mcp_server.tool()
@@ -70,8 +74,8 @@ def add_cards_bulk(cards: list[dict], ctx: Context = None) -> dict:
     """Add multiple flashcards in one call.
 
     Args:
-        cards: List of dicts with "question", "answer", and optional "tags"/"notes" keys.
-            Keep question under 300 chars and answer under 500 chars per card.
+        cards: List of dicts with "question", "answer", and optional "tags"/"topic"/"notes"
+            keys. Keep question under 300 chars and answer under 500 chars per card.
             Prefer atomic cards — one fact each. For an "X vs Y vs Z" comparison,
             emit one card per item rather than cramming all three into one answer.
 
@@ -88,7 +92,8 @@ def add_cards_bulk(cards: list[dict], ctx: Context = None) -> dict:
 @mcp_server.tool()
 def edit_card(
     card_id: int, question: Optional[str] = None, answer: Optional[str] = None,
-    tags: Optional[str] = None, notes: Optional[str] = None, ctx: Context = None,
+    tags: Optional[str] = None, topic: Optional[str] = None, notes: Optional[str] = None,
+    ctx: Context = None,
 ) -> dict:
     """Update an existing card in place. Only the fields you pass are changed.
 
@@ -98,7 +103,7 @@ def edit_card(
     user_id = _authed_user(ctx)
     if user_id is None:
         return _UNAUTHORIZED
-    if not db.edit_card(user_id, card_id, question=question, answer=answer, tags=tags, notes=notes):
+    if not db.edit_card(user_id, card_id, question=question, answer=answer, tags=tags, notes=notes, topic=topic):
         return {"error": f"Card #{card_id} not found."}
     return {"id": card_id, "updated": True, "card": db.get_card(user_id, card_id)}
 
@@ -131,8 +136,8 @@ def suspend_card(card_id: int, suspended: bool = True, ctx: Context = None) -> d
 
 
 @mcp_server.tool()
-def search_cards(keyword: str, ctx: Context = None) -> list[dict]:
-    """Find cards whose question or answer contains `keyword`.
+def search_cards(keyword: str, topic: str = "", ctx: Context = None) -> list[dict]:
+    """Find cards whose question or answer contains `keyword`, optionally within one topic.
 
     Use before adding cards to avoid creating a near-duplicate of something the
     user already has.
@@ -140,16 +145,27 @@ def search_cards(keyword: str, ctx: Context = None) -> list[dict]:
     user_id = _authed_user(ctx)
     if user_id is None:
         return []
-    return db.search_cards(user_id, keyword)
+    return db.search_cards(user_id, keyword, topic=topic.strip() or None)
 
 
 @mcp_server.tool()
-def list_due_cards(ctx: Context = None) -> list[dict]:
-    """Return all cards currently due for review, excluding suspended and buried ones."""
+def list_due_cards(topic: str = "", ctx: Context = None) -> list[dict]:
+    """Return cards currently due for review, excluding suspended and buried ones.
+    Pass topic to review just one bucket instead of everything."""
     user_id = _authed_user(ctx)
     if user_id is None:
         return []
-    return db.list_due_cards(user_id)
+    return db.list_due_cards(user_id, topic=topic.strip() or None)
+
+
+@mcp_server.tool()
+def list_topics(ctx: Context = None) -> list[dict]:
+    """List this user's topics with total and due card counts. Check this before
+    inventing a new topic name on add_card — reuse an existing one if it fits."""
+    user_id = _authed_user(ctx)
+    if user_id is None:
+        return []
+    return [{"topic": t, "total": total, "due": due} for t, total, due in db.list_topics(user_id)]
 
 
 @mcp_server.tool()

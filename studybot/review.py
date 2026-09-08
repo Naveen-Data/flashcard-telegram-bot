@@ -39,6 +39,7 @@ def card_payload(card: dict) -> dict:
         "answer": card["answer"],
         "card_type": card.get("card_type"),
         "tags": card.get("tags") or "",
+        "topic": card.get("topic") or "",
         "notes": card.get("notes") or "",
         "due_at": due_at.isoformat() if due_at else None,
     }
