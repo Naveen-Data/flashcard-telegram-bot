@@ -9,6 +9,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 
 from studybot import db
+from studybot.importer import PackError, import_pack
 
 logging.basicConfig(
     format="%(asctime)s — %(name)s — %(levelname)s — %(message)s",
@@ -106,6 +107,26 @@ def edit_card(
     if not db.edit_card(user_id, card_id, question=question, answer=answer, tags=tags, notes=notes, topic=topic):
         return {"error": f"Card #{card_id} not found."}
     return {"id": card_id, "updated": True, "card": db.get_card(user_id, card_id)}
+
+
+@mcp_server.tool()
+def import_study_pack(pack: dict, dry_run: bool = False, ctx: Context = None) -> dict:
+    """Idempotent upsert of a whole study pack in one call: flashcards plus session notes.
+
+    pack: {"topic": "<default topic for cards>", "cards": [{"question", "answer", "tags",
+    "topic", "notes"}], "notes": [{"topic", "content", "tags"}]}. Cards are matched by
+    question text and notes by title (topic), so re-sending a pack never duplicates —
+    it updates changed answers/notes in place and keeps review history. Prefer this over
+    add_cards_bulk whenever the same material might be pushed twice. dry_run=true reports
+    what would change without writing.
+    """
+    user_id = _authed_user(ctx)
+    if user_id is None:
+        return _UNAUTHORIZED
+    try:
+        return import_pack(user_id, pack, dry_run=dry_run)
+    except PackError as e:
+        return {"error": "invalid study pack", "details": e.errors}
 
 
 @mcp_server.tool()
@@ -296,7 +317,8 @@ class _RequireAuth:
     the ASGI scope's `state` so route handlers and MCP tools read it from there
     rather than re-parsing (and re-trusting) anything the client sends per call.
 
-    /mcp: personal API tokens created in the web app (studybot.db.authenticate_api_token).
+    /mcp and /api/import: personal API tokens created in the web app
+    (studybot.db.authenticate_api_token) — import is for scripts, not browsers.
     /api/*: browser session tokens from login (studybot.db.authenticate_session).
     There is no more static shared secret for either surface — every caller is a
     specific, identified, revocable principal.
@@ -321,7 +343,7 @@ class _RequireAuth:
         token = auth[7:] if auth.startswith("Bearer ") else ""
 
         user_id = (
-            db.authenticate_api_token(token) if path.startswith("/mcp")
+            db.authenticate_api_token(token) if path.startswith("/mcp") or path == "/api/import"
             else db.authenticate_session(token)
         ) if token else None
 

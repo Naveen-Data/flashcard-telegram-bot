@@ -292,6 +292,13 @@ with TestClient(build_app(host="0.0.0.0"), base_url="http://127.0.0.1") as mcp_c
     r = mcp_call(mcp_client, raw2, sid2, "get_card_history", {"card_id": mcp_card_id})
     check("a different user's token cannot read this card via mcp", "error" in tool_result(r))
 
+    r = mcp_call(mcp_client, raw1, sid1, "import_study_pack",
+                 {"pack": {"cards": [{"question": "mcp pack Q", "answer": "A"}]}})
+    check("mcp import_study_pack creates", tool_result(r)["cards"]["created"] == 1, str(tool_result(r)))
+    r = mcp_call(mcp_client, raw1, sid1, "import_study_pack",
+                 {"pack": {"cards": [{"question": "mcp pack Q", "answer": "A"}]}})
+    check("mcp import_study_pack is idempotent", tool_result(r)["cards"]["unchanged"] == 1, str(tool_result(r)))
+
     check("mcp with no token is unauthorized",
           mcp_client.post("/mcp", headers=MCP_HEADERS,
                            json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -302,6 +309,59 @@ with TestClient(build_app(host="0.0.0.0"), base_url="http://127.0.0.1") as mcp_c
                            json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
                                  "params": {"protocolVersion": "2024-11-05", "capabilities": {},
                                             "clientInfo": {"name": "x", "version": "1"}}}).status_code == 401)
+
+# --- study pack import: idempotent upsert over HTTP with a personal API token ---
+
+pack_client = TestClient(build_app(host="0.0.0.0"), base_url="http://127.0.0.1")
+
+
+def push(token, pack, dry=False):
+    return pack_client.post("/api/import" + ("?dry_run=1" if dry else ""), json=pack,
+                            headers={"Authorization": f"Bearer {token}"})
+
+
+pack = {"topic": "System-Design",
+        "cards": [{"question": "What is pack Q1?", "answer": "A1", "tags": ["pack", "Test"]},
+                  {"question": "What is pack Q2?", "answer": "A2", "tags": "pack"}],
+        "notes": [{"topic": "Study Pack: Pack Test", "content": "# v1"}]}
+
+r = push(raw1, pack, dry=True)
+check("import dry-run reports what would be created", r.status_code == 200 and r.json()["cards"]["created"] == 2, r.text)
+check("import dry-run writes nothing", db.search_cards(uid1, "pack Q1") == [])
+r = push(raw1, pack)
+check("import creates cards and note", r.json()["cards"]["created"] == 2 and r.json()["notes"]["created"] == 1, r.text)
+pc = db.search_cards(uid1, "pack Q1")[0]
+check("import canonicalises topic (pack default) and tags (list form)",
+      pc["topic"] == "system-design" and pc["tags"] == "pack,test", str(pc))
+r = push(raw1, pack)
+check("re-pushing the same pack is a no-op",
+      r.json()["cards"] == {"created": 0, "updated": 0, "unchanged": 2}
+      and r.json()["notes"] == {"created": 0, "updated": 0, "unchanged": 1}, r.text)
+
+db.record_answer(uid1, pc["id"], 4)
+pack["cards"][0]["answer"] = "A1 corrected"
+pack["notes"][0]["content"] = "# v2"
+r = push(raw1, pack)
+check("a corrected answer/note updates in place",
+      r.json()["cards"]["updated"] == 1 and r.json()["cards"]["unchanged"] == 1 and r.json()["notes"]["updated"] == 1, r.text)
+after = db.get_card(uid1, pc["id"])
+check("update keeps the card's id and review history", after["answer"] == "A1 corrected" and after["stability"] is not None)
+r = push(raw1, {"cards": [{"question": "  WHAT is Pack q1? ", "answer": "A1 corrected"}]})
+check("question matching ignores case and whitespace", r.json()["cards"]["unchanged"] == 1, r.text)
+r = push(raw1, {"cards": [{"question": "Dup?", "answer": "first"}, {"question": "dup?", "answer": "second"}]})
+check("a repeat inside one pack updates instead of duplicating",
+      r.json()["cards"]["created"] == 1 and r.json()["cards"]["updated"] == 1, r.text)
+r = push(raw2, pack)
+check("another user's import never touches alice's cards",
+      r.json()["cards"]["created"] == 2 and db.get_card(uid1, pc["id"])["answer"] == "A1 corrected", r.text)
+
+r = push(raw1, {"cards": [{"question": "", "answer": 5}]})
+check("invalid pack is rejected with every problem listed", r.status_code == 400 and len(r.json()["details"]) >= 2, r.text)
+check("empty pack is rejected", push(raw1, {"cards": []}).status_code == 400)
+check("non-JSON body is rejected", pack_client.post("/api/import", content="nope", headers={
+      "Authorization": f"Bearer {raw1}", "Content-Type": "application/json"}).status_code == 400)
+check("import needs an API token, not a browser session", push(sess2, pack).status_code == 401)
+check("import without a token is unauthorized", pack_client.post("/api/import", json=pack).status_code == 401)
 
 # --- rate limiting: unaffected by the auth model change ----------------------
 
