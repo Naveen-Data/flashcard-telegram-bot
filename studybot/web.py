@@ -10,6 +10,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 
 from studybot import db
+from studybot.importer import PackError, import_pack
 from studybot.review import apply_review, card_payload
 
 INDEX = """<!doctype html>
@@ -301,6 +302,21 @@ def register(server) -> None:
         if not db.delete_card(user_id(request), card_id):
             return JSONResponse({"error": "card not found"}, status_code=404)
         return JSONResponse({"ok": True})
+
+    @server.custom_route("/api/import", methods=["POST"])
+    async def import_study_pack(request: Request) -> Response:
+        """Upsert a study pack. Authenticated by personal API token (see _RequireAuth)."""
+        if int(request.headers.get("content-length") or 0) > 2_000_000:
+            return JSONResponse({"error": "pack too large (2 MB max)"}, status_code=413)
+        try:
+            pack = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "body is not valid JSON"}, status_code=400)
+        dry_run = request.query_params.get("dry_run", "") in ("1", "true")
+        try:
+            return JSONResponse(import_pack(user_id(request), pack, dry_run=dry_run))
+        except PackError as e:
+            return JSONResponse({"error": "invalid study pack", "details": e.errors}, status_code=400)
 
     @server.custom_route("/api/answer", methods=["POST"])
     async def answer(request: Request) -> Response:
